@@ -45,8 +45,9 @@ from deps import (
     pytesseract,
     TESSERACT_AVAILABLE,
     detect_poppler_path,
+    detect_torch_device,
 )
-from utils import _sanitize_tessdata_prefix, _split_langs, validate_runtime_env
+from utils import _sanitize_tessdata_prefix, _split_langs, validate_runtime_env, resolve_tesseract_cmd
 
 
 class PdfRenderer:
@@ -205,9 +206,17 @@ class OcrPipeline:
         self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir)
         self.log = log
         self.log_error = log_error
+        self._force_easyocr_cpu = str(os.environ.get("EASYOCR_FORCE_CPU", "")).lower() in ("1", "true", "yes", "on")
+        self._torch_device = detect_torch_device()
+        self._easyocr_gpu = (
+            not self._force_easyocr_cpu
+            and self._torch_device.get("installed")
+            and self._torch_device.get("backend") == "cuda"
+        )
         self._easyocr_reader = None
         self._easyocr_lock = threading.Lock()
         self._engine_logged = False
+        self._device_logged = False
         self._ensure_tesseract_cmd()
 
     # --- shared helpers ---
@@ -233,6 +242,30 @@ class OcrPipeline:
 
     def _map_easyocr_langs(self):
         return ocr_e.map_easyocr_langs(self.ocr_lang)
+
+    def _log_easyocr_device_once(self):
+        if self._device_logged:
+            return
+        self._device_logged = True
+        if self._force_easyocr_cpu:
+            if self.log:
+                self.log("EasyOCR: CPU forced via EASYOCR_FORCE_CPU")
+            return
+        if not self._torch_device.get("installed"):
+            if self.log:
+                self.log("EasyOCR: torch not installed; CPU mode")
+            return
+        backend = self._torch_device.get("backend")
+        reason = self._torch_device.get("reason")
+        if backend == "cuda" and self._easyocr_gpu:
+            if self.log:
+                self.log(f"EasyOCR: using CUDA ({reason})")
+        elif backend == "mps":
+            if self.log:
+                self.log("EasyOCR: MPS detected; running CPU because EasyOCR expects CUDA")
+        else:
+            if self.log:
+                self.log(f"EasyOCR: running on CPU ({reason})")
 
     def _is_noise_fragment(self, text: str, confidence: float) -> bool:
         if not text:
@@ -688,22 +721,11 @@ class PDFScraper:
             return 2
 
     def _ensure_tesseract_cmd(self):
-        """Make sure pytesseract points to a real tesseract.exe on Windows."""
+        """Make sure pytesseract points to a real tesseract binary."""
         try:
-            cmd_obj = getattr(pytesseract, 'pytesseract', None)
-            current = getattr(cmd_obj, 'tesseract_cmd', None) if cmd_obj else None
-            if current and Path(current).is_file():
-                return
-
-            default_paths = [
-                Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"),
-                Path(r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe"),
-            ]
-            for candidate in default_paths:
-                if candidate.is_file():
-                    if cmd_obj:
-                        cmd_obj.tesseract_cmd = str(candidate)
-                    break
+            resolved = resolve_tesseract_cmd()
+            if resolved and self.log:
+                self.log(f"tesseract_cmd resolved to {resolved}")
         except Exception:
             pass
 
@@ -713,9 +735,11 @@ class PDFScraper:
 
     def _get_easyocr_reader(self):
         """Lazy-init a shared EasyOCR reader; fallback to None on failure."""
+        self._log_easyocr_device_once()
+        gpu_flag = bool(self._easyocr_gpu)
         reader = ocr_e.get_easyocr_reader(
             self.ocr_lang,
-            gpu=True,
+            gpu=gpu_flag,
             lock=self._easyocr_lock,
             existing_reader=self._easyocr_reader,
             log=self.log,

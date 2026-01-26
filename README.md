@@ -39,11 +39,13 @@ Select PDFs and output folder. Toggles:
 - **Quality mode**: on by default; slower, cleaner.
 - **Speed mode**: disables quality mode and skips extra retries.
 - **Save renders**: persist rendered pages for debugging.
+- **Environment Check**: button in the GUI to verify Poppler/Tesseract/EasyOCR/torch setup.
 
 ### CLI
 ```bash
 python cli.py input1.pdf [input2.pdf ...] -o out_dir --lang ben --quality  # quality mode
 python cli.py input1.pdf -o out_dir --fast                                # speed-first
+python cli.py sample.pdf --check-env                                      # environment diagnostics
 ```
 Optional: `--tessdata-dir /path/to/tessdata_best`, `--persist-renders` to save page images, `--max-workers N` to cap parallelism.
 

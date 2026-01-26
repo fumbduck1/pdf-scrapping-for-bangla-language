@@ -4,7 +4,7 @@ from pathlib import Path
 
 from config import PdfJobConfig
 from scraper import run_pdf_job
-from utils import validate_runtime_env
+from utils import validate_runtime_env, print_env_report
 
 
 def main():
@@ -17,7 +17,12 @@ def main():
     parser.add_argument("--tessdata-dir", help="Custom tessdata directory for Tesseract")
     parser.add_argument("--persist-renders", action="store_true", help="Save rendered page images for debugging")
     parser.add_argument("--max-workers", type=int, help="Override worker pool size")
+    parser.add_argument("--check-env", action="store_true", help="Run environment diagnostics and exit")
     args = parser.parse_args()
+
+    if args.check_env:
+        print_env_report()
+        return
 
     errors, warnings = validate_runtime_env()
     if errors:

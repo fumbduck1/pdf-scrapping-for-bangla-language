@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from config import PdfJobConfig
 from constants import QUALITY_MODE_DEFAULT, OCRSettings
-from utils import validate_runtime_env, check_tesseract_ready
+from utils import validate_runtime_env, check_tesseract_ready, summarize_env
 from deps import EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
 from scraper import run_pdf_job
 
@@ -111,6 +111,8 @@ class MinimalGUI:
         self.process_btn.pack(side=tk.LEFT, padx=5)
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_processing, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+        self.env_btn = ttk.Button(btn_frame, text="Environment Check", command=self.run_env_check)
+        self.env_btn.pack(side=tk.LEFT, padx=5)
         
         progress_frame = ttk.LabelFrame(main, text="Progress", padding="10")
         progress_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -197,6 +199,37 @@ class MinimalGUI:
     def _on_quality_toggle(self):
         if self.quality_var.get():
             self.speed_var.set(False)
+
+    def run_env_check(self):
+        """Run environment diagnostics and show a dialog."""
+        try:
+            info, warnings, errors = summarize_env()
+        except Exception as exc:
+            messagebox.showerror("Environment Check", f"Environment check failed: {exc}")
+            return
+
+        lines = []
+        lines.extend(f"- {item}" for item in info)
+        if warnings:
+            lines.append("\nWarnings:")
+            lines.extend(f"- {w}" for w in warnings)
+        if errors:
+            lines.append("\nErrors:")
+            lines.extend(f"- {e}" for e in errors)
+        msg = "\n".join(lines)
+
+        if errors:
+            messagebox.showerror("Environment Check", msg)
+        elif warnings:
+            messagebox.showwarning("Environment Check", msg)
+        else:
+            messagebox.showinfo("Environment Check", msg)
+
+        self.log("Environment check completed")
+        if warnings:
+            self.log(f"Warnings: {len(warnings)}")
+        if errors:
+            self.log(f"Errors: {len(errors)}")
     
     def start_processing(self):
         """Start processing."""
