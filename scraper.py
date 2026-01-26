@@ -325,9 +325,11 @@ class OcrPipeline:
         os.environ["TESSDATA_PREFIX"] = _sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
 
     def _get_easyocr_reader(self):
+        self._log_easyocr_device_once()
+        gpu_flag = bool(self._easyocr_gpu)
         reader = ocr_e.get_easyocr_reader(
             self.ocr_lang,
-            gpu=True,
+            gpu=gpu_flag,
             lock=self._easyocr_lock,
             existing_reader=self._easyocr_reader,
             log=self.log,

@@ -65,7 +65,10 @@ def detect_torch_device():
         })
         return info
 
-    info["reason"] = "CPU fallback"
+    if "cuda check failed" in info.get("reason", ""):
+        info["reason"] = f"{info['reason']}; CPU fallback"
+    else:
+        info["reason"] = "CPU fallback"
     return info
 
 
@@ -195,7 +198,8 @@ _bootstrap_tesseract_default_paths()
 
 
 def _poppler_bins_exist(path: Path):
-    return any((path / exe).exists() for exe in ["pdftoppm", "pdftocairo"])
+    exe_names = ["pdftoppm", "pdftocairo", "pdftoppm.exe", "pdftocairo.exe"]
+    return any((path / exe).exists() for exe in exe_names)
 
 
 def detect_poppler_path():

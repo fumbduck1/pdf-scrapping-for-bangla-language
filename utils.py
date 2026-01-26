@@ -54,8 +54,8 @@ def resolve_tesseract_cmd():
     if resolved is None:
         if sys.platform.startswith("win"):
             defaults = [
-                r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-                r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+                "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                "C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
             ]
         elif sys.platform == "darwin":
             defaults = [
