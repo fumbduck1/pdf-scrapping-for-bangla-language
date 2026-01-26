@@ -2,6 +2,12 @@
 
 Local OCR app with GUI (Tkinter) and CLI. Renders PDFs with Poppler, runs EasyOCR first, then Tesseract refinements. Defaults favor quality for Bangla; a speed toggle is available.
 
+## Clone
+```bash
+git clone <repo-url>
+cd pdf-scrapper-ongoing
+```
+
 ## Prerequisites
 - Python 3.10+
 - Poppler utilities (for raster OCR). If absent, the app can still extract text layers but will skip image OCR.
