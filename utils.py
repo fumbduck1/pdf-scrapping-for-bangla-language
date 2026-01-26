@@ -154,7 +154,6 @@ def check_poppler_ready():
 
     return False, "Poppler not found; raster OCR will be skipped (install poppler utilities or set POPPLER_PATH)"
 
-
 def summarize_env():
     """Return (info, warnings, errors) describing the runtime environment."""
     errors, warnings = validate_runtime_env()

@@ -10,8 +10,6 @@ from constants import QUALITY_MODE_DEFAULT, OCRSettings
 from utils import validate_runtime_env, check_tesseract_ready, summarize_env
 from deps import EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
 from scraper import run_pdf_job
-
-
 class MinimalGUI:
     def __init__(self, root):
         self.root = root

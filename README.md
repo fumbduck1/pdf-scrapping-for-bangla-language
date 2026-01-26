@@ -54,4 +54,3 @@ Provide a small sample PDF of your own and run:
 ```bash
 python cli.py your_sample.pdf -o out_test --fast
 ```
-

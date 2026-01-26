@@ -12,7 +12,6 @@ from constants import (
     THIRD_PASS_SCALE,
 )
 from deps import _lazy_import_numpy
-
 np = _lazy_import_numpy()
 from utils import _split_langs
 

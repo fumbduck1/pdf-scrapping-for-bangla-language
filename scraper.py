@@ -10,7 +10,6 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PIL import Image, ImageFilter
-
 Image.MAX_IMAGE_PIXELS = 500_000_000
 
 from constants import (

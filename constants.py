@@ -25,7 +25,6 @@ EASYOCR_FALLBACK_CONF = 0.92  # fallback to EasyOCR when below this
 EASYOCR_PRIMARY_CONF = 0.94  # when below, ask Tesseract to refine segment
 TESSERACT_REFINE_MIN_CHARS = 32  # if text is very short, try Tesseract to fill gaps
 
-
 @dataclass
 class OCRSettings:
     use_ocr: bool = True

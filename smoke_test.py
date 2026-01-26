@@ -10,7 +10,6 @@ from config import PdfJobConfig
 from scraper import run_pdf_job
 from utils import validate_runtime_env
 
-
 def main():
     parser = argparse.ArgumentParser(description="Run a smoke test OCR on one PDF (provide your own small sample)")
     parser.add_argument("--pdf", required=True, help="Path to a small sample PDF")

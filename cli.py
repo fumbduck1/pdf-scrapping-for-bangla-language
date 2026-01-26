@@ -6,7 +6,6 @@ from config import PdfJobConfig
 from scraper import run_pdf_job
 from utils import validate_runtime_env, print_env_report
 
-
 def main():
     parser = argparse.ArgumentParser(description="PDF OCR scraper (EasyOCR + Tesseract)")
     parser.add_argument("pdf", nargs="+", help="PDF file(s) to process")

@@ -84,8 +84,7 @@ def log_torch_env():
     print("device backend:", device.get("backend"))
     print("device:", device.get("device"))
     print("reason:", device.get("reason"))
-
-
+    
 convert_from_path = None
 convert_from_bytes = None
 PDF2IMAGE_AVAILABLE = False

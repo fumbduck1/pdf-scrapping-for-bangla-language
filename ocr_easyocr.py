@@ -20,7 +20,6 @@ def map_easyocr_langs(ocr_lang: str):
             codes.append(code.lower())
     return codes or ["en"]
 
-
 def get_easyocr_reader(ocr_lang: str, gpu: bool, lock: threading.Lock, existing_reader, log, log_error):
     if not EASYOCR_AVAILABLE:
         return None
