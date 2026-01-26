@@ -5,7 +5,7 @@ Local OCR app with GUI (Tkinter) and CLI. Renders PDFs with Poppler, runs EasyOC
 ## Clone
 ```bash
 git clone <repo-url>
-cd pdf-scrapper-ongoing
+cd pdf-scrapping-for-bangla-language
 ```
 
 ## Prerequisites
