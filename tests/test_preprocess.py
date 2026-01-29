@@ -98,6 +98,19 @@ class TestPreprocess(unittest.TestCase):
         )
         self.assertIsInstance(processed, Image.Image)
 
+    def test_preprocess_downscales_large_images(self):
+        """Very large renders should be downscaled under the global pixel cap."""
+        large = Image.new('L', (5000, 4000), color=180)  # 20M pixels
+        processed = preprocess_image_for_ocr(
+            large,
+            ocr_lang="ben",
+            fast_mode=True,
+            quality_mode=False,
+        )
+        pixels = processed.width * processed.height
+        from constants import MAX_OCR_PIXELS
+        self.assertLessEqual(pixels, MAX_OCR_PIXELS)
+
 
 if __name__ == "__main__":
     unittest.main()

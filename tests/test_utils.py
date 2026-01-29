@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # Add project root to Python path
@@ -67,6 +68,18 @@ class TestUtils(unittest.TestCase):
         ok, msg = check_poppler_ready()
         self.assertIsInstance(ok, bool)
         self.assertIsInstance(msg, str)
+
+    def test_resolve_tesseract_cmd_missing(self):
+        """When Tesseract is unavailable, resolver should return None without raising."""
+        with mock.patch("utils.TESSERACT_AVAILABLE", False):
+            self.assertIsNone(resolve_tesseract_cmd())
+
+    def test_check_tesseract_ready_missing(self):
+        """check_tesseract_ready should return graceful warning when Tesseract absent."""
+        with mock.patch("utils.TESSERACT_AVAILABLE", False):
+            ok, msg = check_tesseract_ready()
+            self.assertFalse(ok)
+            self.assertIn("tesseract", msg.lower())
 
 
 if __name__ == "__main__":

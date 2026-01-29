@@ -98,6 +98,29 @@ def test_performance_monitor():
     print("Performance monitor test passed")
 
 
+def test_timer_and_profile_record_metrics():
+    """timer decorator and profile context should both record metrics."""
+    from performance import timer, profile
+
+    monitor = get_monitor()
+    monitor.clear()
+
+    @timer("timer_metric")
+    def sample():
+        return 7
+
+    with profile("profile_section"):
+        self_val = sample()
+
+    assert self_val == 7
+    summary = monitor.get_summary()
+    metrics = summary.get("metrics", {})
+    assert "timer_metric" in metrics
+    assert metrics["timer_metric"]["count"] == 1
+    assert "profile_section" in metrics
+    assert metrics["profile_section"]["count"] == 1
+
+
 def test_config_validation():
     """Test various configuration validation scenarios"""
     from config_manager import get_config_manager
