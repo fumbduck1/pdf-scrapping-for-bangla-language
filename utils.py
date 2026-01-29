@@ -21,8 +21,8 @@ def _sanitize_tessdata_prefix(prefix: str):
     if not prefix:
         return None
     try:
-        cleaned = str(Path(prefix).expanduser().resolve()).strip(" '\"")
-        return cleaned
+        cleaned = prefix.strip(" '\"")
+        return str(Path(cleaned).expanduser().resolve())
     except Exception:
         return prefix.strip(" '\"")
 

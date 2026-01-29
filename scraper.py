@@ -1,4 +1,4 @@
-import logging
+from logger import get_logger, debug, info, warning, error, critical, exception
 import re
 import os
 import sys
@@ -32,8 +32,11 @@ from constants import (
     EASYOCR_FALLBACK_CONF,
     EASYOCR_PRIMARY_CONF,
     TESSERACT_REFINE_MIN_CHARS,
+    HEADER_FOOTER_CROP_PCT,
+    QUANTIZE_LEVELS,
+    QUANTIZE_DITHER,
 )
-from config import PdfJobConfig
+from config_manager import JobConfig
 import preprocess as preproc
 import ocr_easyocr as ocr_e
 import ocr_tesseract as ocr_t
@@ -47,10 +50,14 @@ from deps import (
     detect_torch_device,
 )
 from utils import _sanitize_tessdata_prefix, _split_langs, validate_runtime_env, resolve_tesseract_cmd
+from performance import get_monitor, timer, profile, register_metrics
+
+# Register performance metrics
+register_metrics()
 
 
 class PdfRenderer:
-    """Rendering helper to manage PDF handles and page rasterization."""
+    """Rendering helper to manage PDF handles and page rasterization with caching."""
 
     def __init__(self, pdf_path, output_dir, pdf_bytes_cache_mb, poppler_path, log, log_error, persist_renders=False):
         self.pdf_path = pdf_path
@@ -65,6 +72,9 @@ class PdfRenderer:
         self.log_error = log_error
         self.persist_renders = persist_renders
         self.setup_directories()
+        
+        # Page cache for rendered images
+        self._render_cache = {}
 
     def setup_directories(self):
         if not self.persist_renders:
@@ -98,8 +108,14 @@ class PdfRenderer:
             self.close()
             return False
 
+    @timer("pdf_rendering")
     def render_page(self, page_num, zoom, fmt="png"):
-        """Render a single page and return a PIL image; optionally persist to disk."""
+        """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
+        # Check if we have a cached render
+        cache_key = (page_num, zoom, fmt)
+        if cache_key in self._render_cache:
+            return self._render_cache[cache_key]
+            
         convert_from_path, convert_from_bytes = _lazy_import_pdf2image()
         if not convert_from_path or not convert_from_bytes:
             self._log_missing("pdf2image not installed. Install with: pip install pdf2image", err_key="pdf2image")
@@ -138,6 +154,9 @@ class PdfRenderer:
                 except Exception:
                     render_path = None
 
+            # Cache the render
+            self._render_cache[cache_key] = (render_img, render_path)
+            
             return render_img, render_path
         except Exception as e:
             self._log_error(f"Render error (page {page_num + 1}): {e}")
@@ -378,6 +397,7 @@ class OcrPipeline:
             log_fn=self.log,
         )
 
+    @timer("easyocr_pass")
     def extract_text_with_easyocr_primary(self, image_path_or_image):
         if not EASYOCR_AVAILABLE:
             if self.log:
@@ -462,6 +482,7 @@ class OcrPipeline:
                 self.log_error(f"EasyOCR-first error: {e}")
             return None
 
+    @timer("tesseract_pass")
     def extract_text_with_tesseract(self, image_path_or_image):
         if not TESSERACT_AVAILABLE:
             if self.log:
@@ -602,6 +623,22 @@ class PDFScraper:
         quality_mode=QUALITY_MODE_DEFAULT,
         persist_renders=False,
         max_workers=None,
+        fast_mode=FAST_MODE,
+        fast_confidence_skip=FAST_CONFIDENCE_SKIP,
+        pdf_bytes_cache_mb=PDF_BYTES_CACHE_MB,
+        zoom=DEFAULT_ZOOM,
+        high_dpi_zoom=HIGH_DPI_ZOOM,
+        high_dpi_retry_conf=HIGH_DPI_RETRY_CONF,
+        header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
+        watermark_flatten=WATERMARK_FLATTEN,
+        watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
+        watermark_retry_conf=WATERMARK_RETRY_CONF,
+        quantize_levels=QUANTIZE_LEVELS,
+        quantize_dither=QUANTIZE_DITHER,
+        third_pass_scale=THIRD_PASS_SCALE,
+        text_layer_first=TEXT_LAYER_FIRST,
+        text_layer_lang_min_ratio=TEXT_LAYER_LANG_MIN_RATIO,
+        text_layer_min_ben_chars=TEXT_LAYER_MIN_BEN_CHARS,
     ):
         """Initialize PDF scraper."""
         self.pdf_path = pdf_path
@@ -618,12 +655,22 @@ class PDFScraper:
                 langs.append("eng")
                 self.ocr_lang = "+".join(langs)
         self.quality_mode = bool(quality_mode)
-        self.fast_mode = False if self.quality_mode else FAST_MODE
-        self.fast_conf_skip = 0.75 if self.quality_mode else FAST_CONFIDENCE_SKIP
+        self.fast_mode = fast_mode
+        self.fast_conf_skip = fast_confidence_skip
         self.line_merge_y_tolerance = 12
-        self.page_render_zoom = DEFAULT_ZOOM
-        self.high_dpi_retry_conf = HIGH_DPI_RETRY_CONF
-        self.high_dpi_zoom = HIGH_DPI_ZOOM
+        self.page_render_zoom = zoom
+        self.high_dpi_retry_conf = high_dpi_retry_conf
+        self.high_dpi_zoom = high_dpi_zoom
+        self.header_footer_crop_pct = header_footer_crop_pct
+        self.watermark_flatten = watermark_flatten
+        self.watermark_clip_threshold = watermark_clip_threshold
+        self.watermark_retry_conf = watermark_retry_conf
+        self.quantize_levels = quantize_levels
+        self.quantize_dither = quantize_dither
+        self.third_pass_scale = third_pass_scale
+        self.text_layer_first = text_layer_first
+        self.text_layer_lang_min_ratio = text_layer_lang_min_ratio
+        self.text_layer_min_ben_chars = text_layer_min_ben_chars
         self.progress_callback = progress_callback
         self.stop_event = stop_event
         self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
@@ -635,19 +682,12 @@ class PDFScraper:
             'extraction_log': []
         }
         os.makedirs(self.output_dir, exist_ok=True)
-        self.logger = logging.getLogger(f"pdfscraper.{Path(self.pdf_path).stem}")
-        if not self.logger.handlers:
-            self.logger.setLevel(logging.INFO)
-            try:
-                fh = logging.FileHandler(os.path.join(self.output_dir, "extraction.log"), encoding="utf-8")
-                fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-                self.logger.addHandler(fh)
-            except Exception:
-                pass
+        from logger import get_logger
+        self.logger = get_logger()
         self.renderer = PdfRenderer(
             pdf_path=self.pdf_path,
             output_dir=self.output_dir,
-            pdf_bytes_cache_mb=PDF_BYTES_CACHE_MB,
+            pdf_bytes_cache_mb=pdf_bytes_cache_mb,
             poppler_path=self.poppler_path,
             log=self.log,
             log_error=self.log_error,
@@ -846,6 +886,7 @@ class PDFScraper:
         """Render a single page using pdf2image/Poppler; returns (PIL image, saved_path|None)."""
         return self.renderer.render_page(page_num, zoom or self.page_render_zoom, fmt="png")
 
+    @timer("page_processing")
     def _process_page_with_ocr(self, page_num):
         """Optimized page processing with intelligent retry logic and error recovery."""
         if self.stop_event and self.stop_event.is_set():
@@ -1018,6 +1059,7 @@ class PDFScraper:
             log_error=self.log_error,
         )
 
+    @timer("page_processing")
     def scrape_all_pages(self):
         """Scrape all pages with optional parallel OCR per page."""
         if not self.open_pdf():
@@ -1252,7 +1294,7 @@ class PDFScraper:
             return False
 
 
-def run_pdf_job(job_config: PdfJobConfig, stop_event, log_cb):
+def run_pdf_job(job_config: JobConfig, stop_event, log_cb):
     """Run a single PDF job using the provided configuration."""
     errors, warnings = validate_runtime_env()
     if errors:
@@ -1272,12 +1314,28 @@ def run_pdf_job(job_config: PdfJobConfig, stop_event, log_cb):
             job_config.pdf_path,
             pdf_output,
             use_ocr=job_config.use_ocr,
-            ocr_method=job_config.ocr_method,
-            ocr_lang=job_config.ocr_lang,
-            quality_mode=job_config.quality_mode,
-            tessdata_dir=job_config.tessdata_dir,
-            persist_renders=getattr(job_config, "persist_renders", False),
-            max_workers=getattr(job_config, "max_workers", None),
+            ocr_method=job_config.ocr.ocr_method,
+            ocr_lang=job_config.ocr.ocr_lang,
+            quality_mode=job_config.ocr.quality_mode,
+            fast_mode=job_config.ocr.fast_mode,
+            fast_confidence_skip=job_config.ocr.fast_confidence_skip,
+            tessdata_dir=job_config.ocr.tessdata_dir,
+            persist_renders=job_config.render.persist_renders,
+            pdf_bytes_cache_mb=job_config.render.pdf_bytes_cache_mb,
+            zoom=job_config.render.zoom,
+            high_dpi_zoom=job_config.render.high_dpi_zoom,
+            high_dpi_retry_conf=job_config.render.high_dpi_retry_conf,
+            header_footer_crop_pct=job_config.preprocess.header_footer_crop_pct,
+            watermark_flatten=job_config.preprocess.watermark_flatten,
+            watermark_clip_threshold=job_config.preprocess.watermark_clip_threshold,
+            watermark_retry_conf=job_config.preprocess.watermark_retry_conf,
+            quantize_levels=job_config.preprocess.quantize_levels,
+            quantize_dither=job_config.preprocess.quantize_dither,
+            third_pass_scale=job_config.preprocess.third_pass_scale,
+            text_layer_first=job_config.text_layer.text_layer_first,
+            text_layer_lang_min_ratio=job_config.text_layer.text_layer_lang_min_ratio,
+            text_layer_min_ben_chars=job_config.text_layer.text_layer_min_ben_chars,
+            max_workers=job_config.max_workers,
             progress_callback=log_cb,
             stop_event=stop_event,
         )

@@ -5,7 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from config import PdfJobConfig
+from config_manager import create_job_config
 from constants import QUALITY_MODE_DEFAULT, OCRSettings
 from utils import validate_runtime_env, check_tesseract_ready, summarize_env
 from deps import EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
@@ -292,13 +292,14 @@ class MinimalGUI:
             if not self.is_processing or (self.stop_event and self.stop_event.is_set()):
                 break
             self.log(f"[{idx + 1}/{total}] {Path(pdf_file).name}")
-            job_config = PdfJobConfig(
+            job_config = create_job_config(
                 pdf_path=pdf_file,
                 output_root=self.output_dir,
                 use_ocr=settings.use_ocr,
                 ocr_method=settings.ocr_method,
                 ocr_lang=settings.ocr_lang,
                 quality_mode=settings.quality_mode,
+                fast_mode=self.speed_var.get(),
                 persist_renders=self.persist_var.get(),
             )
             result = run_pdf_job(job_config, self.stop_event, self.log)

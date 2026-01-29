@@ -6,7 +6,7 @@ Usage:
 import argparse
 from pathlib import Path
 
-from config import PdfJobConfig
+from config_manager import create_job_config
 from scraper import run_pdf_job
 from utils import validate_runtime_env
 
@@ -28,11 +28,12 @@ def main():
     if not pdf.exists():
         raise SystemExit(f"Sample PDF not found: {pdf}")
 
-    job = PdfJobConfig(
+    job = create_job_config(
         pdf_path=str(pdf),
         output_root=args.output,
         ocr_lang=args.lang,
         quality_mode=not args.fast,
+        fast_mode=args.fast,
     )
 
     print(f"Running smoke test on {pdf} ...")
