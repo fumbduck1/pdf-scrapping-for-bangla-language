@@ -17,7 +17,6 @@ class MinimalGUI:
         self.root.geometry("640x560")
         self.root.minsize(640, 560)
         self.root.resizable(True, True)
-        self.style = ttk.Style()
         
         self.pdf_files = []
         self.output_dir = None
@@ -27,7 +26,6 @@ class MinimalGUI:
         self.quality_var = tk.BooleanVar(value=QUALITY_MODE_DEFAULT)
         self.speed_var = tk.BooleanVar(value=False)
         self.persist_var = tk.BooleanVar(value=False)
-        self.ui_scale = None
         self.event_queue = queue.Queue()
         
         self.setup_ui()
@@ -43,7 +41,6 @@ class MinimalGUI:
         except Exception:
             scale = 1.0
         scale = max(0.8, min(scale, 1.4))
-        self.ui_scale = scale
         try:
             self.root.tk.call("tk", "scaling", scale)
         except Exception:
@@ -121,13 +118,6 @@ class MinimalGUI:
         self.status_label = ttk.Label(progress_frame, textvariable=self.status_var, font=("Arial", 9))
         self.status_label.pack(fill=tk.X)
 
-    def default_ocr_missing(self):
-        """Return error message if selected OCR engine is missing."""
-        ok, msg = check_tesseract_ready()
-        if ok:
-            return None
-        return msg
-    
     def select_pdfs(self):
         """Select PDF files."""
         files = filedialog.askopenfilenames(title="Select PDF files", filetypes=[("PDF", "*.pdf")])

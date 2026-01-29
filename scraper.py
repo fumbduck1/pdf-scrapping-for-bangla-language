@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PIL import Image, ImageFilter
 Image.MAX_IMAGE_PIXELS = 500_000_000
+_ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
 
 from constants import (
     DEFAULT_ZOOM,
@@ -262,9 +263,6 @@ class OcrPipeline:
 
     def _score_result(self, res):
         return ocr_t.score_result(res)
-
-    def _map_easyocr_langs(self):
-        return ocr_e.map_easyocr_langs(self.ocr_lang)
 
     def _log_easyocr_device_once(self):
         if self._device_logged:
@@ -662,7 +660,6 @@ class PDFScraper:
         self.quality_mode = bool(quality_mode)
         self.fast_mode = fast_mode
         self.fast_conf_skip = fast_confidence_skip
-        self.line_merge_y_tolerance = 12
         self.page_render_zoom = zoom
         self.high_dpi_retry_conf = high_dpi_retry_conf
         self.high_dpi_zoom = high_dpi_zoom
@@ -720,36 +717,6 @@ class PDFScraper:
             os.makedirs(self.renders_dir, exist_ok=True)
         except Exception:
             pass
-
-    def _resolve_tessdata_dir(self, provided):
-        """Pick a tessdata folder, preferring explicit/env/known install paths."""
-        if provided and Path(provided).is_dir():
-            return str(Path(provided))
-
-        env_dir = os.environ.get("TESSDATA_PREFIX")
-        if env_dir and Path(env_dir).is_dir():
-            return str(Path(env_dir))
-
-        try:
-            cmd = getattr(pytesseract, 'pytesseract', None)
-            if cmd and getattr(cmd, 'tesseract_cmd', None):
-                root = Path(cmd.tesseract_cmd).parent
-                candidates = [root / "tessdata_best", root / "tessdata"]
-                for cand in candidates:
-                    if cand.is_dir():
-                        return str(cand)
-        except Exception:
-            pass
-
-        win_candidates = [
-            Path(r"C:\\Program Files\\Tesseract-OCR\\tessdata"),
-            Path(r"C:\\Program Files (x86)\\Tesseract-OCR\\tessdata"),
-        ]
-        for cand in win_candidates:
-            if cand.is_dir():
-                return str(cand)
-
-        return None
 
     def _worker_count(self):
         """Optimized worker pool size for parallel OCR processing."""
@@ -984,52 +951,6 @@ class PDFScraper:
 
     def _choose_psm(self, image, segment_count):
         return preproc.choose_psm(image, segment_count)
-
-    def _build_tess_config(self, extra=None, psm=None):
-        """Build optimized Tesseract config for Bengali/English processing."""
-        langs = _split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
-        has_ben = "ben" in langs
-        has_eng = "eng" in langs
-        mode = psm or 6
-        parts = [
-            f"--psm {mode}",
-            "--oem 1",
-        ]
-        if has_ben:
-            parts.extend([
-                "-c preserve_interword_spaces=1",
-                "-c chop_enable=0",
-                "-c use_new_state_cost=F",
-                "-c segment_penalty_garbage=1.5",
-                "-c wordrec_enable_assoc=1",
-                "-c language_model_penalty_non_freq_dict_word=0.1",
-                "-c language_model_penalty_non_dict_word=0.15",
-            ])
-            if has_eng:
-                parts.extend([
-                    "-c textord_really_old_xheight=1",
-                    "-c textord_min_xheight=12",
-                ])
-        else:
-            parts.extend([
-                "-c preserve_interword_spaces=1",
-                "-c segment_penalty_garbage=0.5",
-                "-c wordrec_enable_assoc=0",
-                "-c language_model_penalty_non_dict_word=0.5",
-            ])
-        if self.quality_mode if hasattr(self, 'quality_mode') else False:
-            parts.extend([
-                "-c tessedit_char_blacklist=",
-                "-c textord_noise_normratio=2",
-            ])
-        else:
-            parts.extend([
-                "-c tessedit_char_blacklist=|[]{}",
-                "-c textord_noise_normratio=1",
-            ])
-        if extra:
-            parts.extend(extra)
-        return ' '.join(parts)
 
     def _extract_text_layer(self, page):
         """Fast path: pull native text from the PDF; returns normalized string or ''."""

@@ -88,7 +88,6 @@ class ConfigManager:
     """Centralized configuration manager"""
     
     def __init__(self):
-        self._config: Optional[JobConfig] = None
         self._env_vars = self._load_env_vars()
     
     def _load_env_vars(self) -> Dict[str, str]:

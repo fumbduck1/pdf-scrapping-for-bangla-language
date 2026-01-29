@@ -3,14 +3,13 @@ import sys
 import shutil
 from pathlib import Path
 
-TORCH_AVAILABLE = False
 torch = None
 torchvision = None
 
 
 def _ensure_torch_imported():
-    """Lazy import torch/torchvision; set TORCH_AVAILABLE flag."""
-    global TORCH_AVAILABLE, torch, torchvision
+    """Lazy import torch/torchvision; return True when both modules are present."""
+    global torch, torchvision
     if torch is not None and torchvision is not None:
         return True
     try:
@@ -18,10 +17,8 @@ def _ensure_torch_imported():
         import torchvision as _torchvision
         torch = _torch
         torchvision = _torchvision
-        TORCH_AVAILABLE = True
         return True
     except ImportError:
-        TORCH_AVAILABLE = False
         return False
 
 

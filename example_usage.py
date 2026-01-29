@@ -17,35 +17,6 @@ from logger import info, debug, warning, error, exception
 from config_manager import get_config_manager, create_job_config
 
 
-def setup_test_environment():
-    """Setup test environment directories"""
-    test_dir = Path("test_output")
-    test_dir.mkdir(exist_ok=True)
-    
-    # Create a simple test configuration
-    config = create_job_config(
-        pdf_path=os.path.abspath("sample.pdf"),
-        output_root=os.path.abspath(test_dir),
-        use_ocr=True,
-        ocr=dict(
-            ocr_method="easyocr",
-            ocr_lang="en",
-            quality_mode=True,
-            fast_mode=False
-        ),
-        render=dict(
-            zoom=2.0,
-            persist_renders=True
-        ),
-        preprocess=dict(
-            watermark_flatten=True,
-            quantize_levels=32
-        )
-    )
-    
-    return config
-
-
 @timer("example_task")
 def simulate_pdf_processing():
     """Simulate PDF processing tasks to demonstrate performance monitoring"""

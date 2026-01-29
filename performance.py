@@ -60,16 +60,11 @@ class PerformanceMonitor:
         self._metrics: Dict[str, PerformanceMetric] = {}
         self._start_time = time.time()
         self._profiling_stack = []
-        self._current_profile = None
 
     def register_metric(self, name: str, units: str = "seconds", description: str = ""):
         """Register a new performance metric"""
         if name not in self._metrics:
             self._metrics[name] = PerformanceMetric(name, units=units, description=description)
-
-    def get_metric(self, name: str) -> Optional[PerformanceMetric]:
-        """Get a registered metric"""
-        return self._metrics.get(name)
 
     def add_metric_value(self, name: str, value: float, units: str = "seconds"):
         """Add a value to a metric (create if doesn't exist)"""
@@ -128,7 +123,6 @@ class PerformanceMonitor:
         self._metrics.clear()
         self._start_time = time.time()
         self._profiling_stack.clear()
-        self._current_profile = None
 
     def print_summary(self):
         """Print a formatted summary of performance metrics"""
@@ -188,7 +182,7 @@ def profile(section_name: str):
             monitor.start_profiling(self.name)
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        def __exit__(self, _exc_type, _exc_val, _exc_tb):
             monitor.stop_profiling(self.name)
 
     return ProfileContext(section_name)

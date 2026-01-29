@@ -18,6 +18,7 @@ from utils import _split_langs
 
 # Allow large images; defer overall cap to caller if needed.
 Image.MAX_IMAGE_PIXELS = 500_000_000
+_ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
 
 
 def quantize_params(ocr_lang: str, fast_mode: bool) -> Tuple[int, bool]:

@@ -54,35 +54,6 @@ class Logger:
     def get_logger(self):
         """Get the configured logger instance"""
         return self._logger
-    
-    def set_level(self, level: int):
-        """Set the logging level"""
-        self._logger.setLevel(level)
-        for handler in self._logger.handlers:
-            handler.setLevel(level)
-    
-    def set_console_level(self, level: int):
-        """Set the console handler level"""
-        for handler in self._logger.handlers:
-            if isinstance(handler, logging.StreamHandler):
-                handler.setLevel(level)
-    
-    def set_file_level(self, level: int):
-        """Set the file handler level"""
-        for handler in self._logger.handlers:
-            if isinstance(handler, logging.FileHandler):
-                handler.setLevel(level)
-    
-    def add_file_handler(self, file_path: str):
-        """Add an additional file handler"""
-        file_handler = logging.FileHandler(file_path)
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        file_handler.setFormatter(file_formatter)
-        self._logger.addHandler(file_handler)
 
 
 # Global logger instance
@@ -122,30 +93,3 @@ def critical(msg: str, *args, **kwargs):
 def exception(msg: str, *args, **kwargs):
     """Log exception message"""
     get_logger().exception(msg, *args, **kwargs)
-
-
-class LogCallback:
-    """Wrapper class to adapt logging to callback interface"""
-    
-    def __init__(self, level: int = logging.INFO):
-        self.level = level
-    
-    def __call__(self, message: str):
-        """Call the logger with the appropriate level"""
-        if self.level == logging.DEBUG:
-            debug(message)
-        elif self.level == logging.INFO:
-            info(message)
-        elif self.level == logging.WARNING:
-            warning(message)
-        elif self.level == logging.ERROR:
-            error(message)
-        elif self.level == logging.CRITICAL:
-            critical(message)
-        else:
-            info(message)
-
-
-def create_log_callback(level: int = logging.INFO) -> LogCallback:
-    """Create a logging callback function"""
-    return LogCallback(level)
