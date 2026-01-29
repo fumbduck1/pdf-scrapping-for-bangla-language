@@ -24,3 +24,5 @@ coverage.xml
 # Editors
 .vscode/
 .idea/
+# Review
+review_plan.md
