@@ -10,6 +10,7 @@ from constants import (
     QUANTIZE_LEVELS,
     QUANTIZE_DITHER,
     THIRD_PASS_SCALE,
+    MAX_OCR_PIXELS,
 )
 from deps import _lazy_import_numpy
 np = _lazy_import_numpy()
@@ -133,7 +134,14 @@ def upscale_for_retry(image, scale=THIRD_PASS_SCALE):
     try:
         scale = max(scale, 1.0)
         w, h = image.size
-        new_size = (int(w * scale), int(h * scale))
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        if MAX_OCR_PIXELS and (new_w * new_h) > MAX_OCR_PIXELS:
+            # Respect global pixel cap to avoid Tesseract/Leptonica OOMs
+            safe_scale = (MAX_OCR_PIXELS / float(w * h)) ** 0.5
+            new_w = max(1, int(w * safe_scale))
+            new_h = max(1, int(h * safe_scale))
+        new_size = (new_w, new_h)
         return image.resize(new_size, Image.Resampling.LANCZOS)
     except Exception:
         return image
@@ -146,6 +154,19 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
         langs = _split_langs(ocr_lang)
         has_ben = "ben" in langs
         has_eng = "eng" in langs
+
+        # Downscale very large renders before any heavy processing to prevent RAM exhaustion.
+        try:
+            w, h = img.size
+            pixels = w * h
+            if MAX_OCR_PIXELS and pixels > MAX_OCR_PIXELS:
+                scale = (MAX_OCR_PIXELS / float(pixels)) ** 0.5
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                if log_fn:
+                    log_fn(f"Downscaled large render from {w}x{h} to {new_size[0]}x{new_size[1]} to stay under memory cap")
+        except Exception:
+            pass
 
         if img.width < 1200:
             if has_ben:

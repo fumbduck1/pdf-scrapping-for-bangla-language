@@ -21,6 +21,11 @@ SEGMENT_RETRY_CONF = 0.92  # rerun segment OCR when below this confidence
 THIRD_PASS_SCALE = 1.45  # upscale factor for last-chance segment retry
 EASYOCR_FALLBACK_CONF = 0.92  # fallback to EasyOCR when below this
 
+# Hard cap to avoid exhausting RAM when OCR engines receive very large renders
+# 12M pixels keeps memory ~35–40 MB per image for uint8 arrays and prevents
+# Tesseract/Leptonica malloc failures on consumer machines.
+MAX_OCR_PIXELS = 12_000_000
+
 # EasyOCR-first defaults and refinement thresholds
 EASYOCR_PRIMARY_CONF = 0.94  # when below, ask Tesseract to refine segment
 TESSERACT_REFINE_MIN_CHARS = 32  # if text is very short, try Tesseract to fill gaps
