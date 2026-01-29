@@ -42,14 +42,14 @@ def quantize_params(ocr_lang: str, fast_mode: bool) -> Tuple[int, bool]:
     return levels, dither
 
 
-def crop_header_footer(image):
+def crop_header_footer(image, pct: float = HEADER_FOOTER_CROP_PCT):
     """Remove top/bottom bands to drop running headers/footers."""
     try:
-        if HEADER_FOOTER_CROP_PCT <= 0:
+        if pct <= 0:
             return image
         img = image if isinstance(image, Image.Image) else Image.open(image)
         w, h = img.size
-        band = int(h * HEADER_FOOTER_CROP_PCT)
+        band = int(h * pct)
         top = band
         bottom = h - band
         if bottom <= top:
@@ -89,10 +89,10 @@ def choose_psm(image, segment_count: int) -> int:
     density = estimate_density(image)
     if segment_count > 1:
         return 4
-    if density < 0.04:
-        return 11
-    if density < 0.08:
-        return 11
+    if density < 0.06:
+        return 11  # very sparse ink; favor single-column sparse mode
+    if density < 0.12:
+        return 6   # moderately sparse; allow block segmentation
     return 6
 
 

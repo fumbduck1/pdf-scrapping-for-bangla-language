@@ -214,13 +214,17 @@ def _sentence_chunks(text: str):
 class OcrPipeline:
     """OCR orchestrator that encapsulates EasyOCR/Tesseract strategies."""
 
-    def __init__(self, ocr_method, ocr_lang, quality_mode, fast_mode, fast_conf_skip, tessdata_dir, log, log_error):
+    def __init__(self, ocr_method, ocr_lang, quality_mode, fast_mode, fast_conf_skip, tessdata_dir, log, log_error,
+                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT, watermark_flatten=WATERMARK_FLATTEN, watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD):
         self.ocr_method = ocr_method
         self.ocr_method_effective = ocr_method
         self.ocr_lang = ocr_lang
         self.quality_mode = quality_mode
         self.fast_mode = fast_mode
         self.fast_conf_skip = fast_conf_skip
+        self.header_footer_crop_pct = header_footer_crop_pct
+        self.watermark_flatten = watermark_flatten
+        self.watermark_clip_threshold = watermark_clip_threshold
         self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir)
         self.log = log
         self.log_error = log_error
@@ -249,8 +253,9 @@ class OcrPipeline:
     def _maybe_split_columns(self, image):
         return preproc.maybe_split_columns(image, fast_mode=self.fast_mode)
 
-    def _flatten_background(self, image, clip=WATERMARK_CLIP_THRESHOLD):
-        return preproc.flatten_background(image, clip=clip)
+    def _flatten_background(self, image, clip=None):
+        clip_val = self.watermark_clip_threshold if clip is None else clip
+        return preproc.flatten_background(image, clip=clip_val)
 
     def _choose_psm(self, image, segment_count):
         return preproc.choose_psm(image, segment_count)
@@ -405,12 +410,12 @@ class OcrPipeline:
             return self.extract_text_with_tesseract(image_path_or_image)
         try:
             raw_img = self._load_image(image_path_or_image)
-            cropped_img = preproc.crop_header_footer(raw_img)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
             preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
-            flattened_img = self._flatten_background(preprocessed_img) if WATERMARK_FLATTEN else None
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
             flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
             segments = [(seg, idx) for idx, seg in enumerate(base_segments_preview)]
 
@@ -491,12 +496,12 @@ class OcrPipeline:
         self._verify_language_file()
         try:
             raw_img = self._load_image(image_path_or_image)
-            cropped_img = preproc.crop_header_footer(raw_img)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
             preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
-            flattened_img = self._flatten_background(preprocessed_img) if WATERMARK_FLATTEN else None
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
 
             if self.ocr_lang.startswith('ben'):
                 try:
@@ -702,6 +707,9 @@ class PDFScraper:
             tessdata_dir=self.tessdata_dir,
             log=self.log,
             log_error=self.log_error,
+            header_footer_crop_pct=self.header_footer_crop_pct,
+            watermark_flatten=self.watermark_flatten,
+            watermark_clip_threshold=self.watermark_clip_threshold,
         )
     
     def setup_directories(self):
@@ -769,26 +777,6 @@ class PDFScraper:
                 self.log(f"tesseract_cmd resolved to {resolved}")
         except Exception:
             pass
-
-    def _map_easyocr_langs(self):
-        """Convert Tesseract-style lang string to EasyOCR list."""
-        return ocr_e.map_easyocr_langs(getattr(self, 'ocr_lang', '') or '')
-
-    def _get_easyocr_reader(self):
-        """Lazy-init a shared EasyOCR reader; fallback to None on failure."""
-        self._log_easyocr_device_once()
-        gpu_flag = bool(self._easyocr_gpu)
-        reader = ocr_e.get_easyocr_reader(
-            self.ocr_lang,
-            gpu=gpu_flag,
-            lock=self._easyocr_lock,
-            existing_reader=self._easyocr_reader,
-            log=self.log,
-            log_error=self.log_error,
-        )
-        if reader is not None:
-            self._easyocr_reader = reader
-        return reader
 
     def _verify_language_file(self):
         """Ensure the requested language data exists; log a clear error if not."""
@@ -981,8 +969,18 @@ class PDFScraper:
             text = text.replace(zw, '')
         return '\n'.join(' '.join(line.split()) for line in text.splitlines())
 
-    def _flatten_background(self, image, clip=WATERMARK_CLIP_THRESHOLD):
-        return preproc.flatten_background(image, clip=clip)
+    def _bangla_ratio(self, text: str):
+        """Return (ratio, count) of Bangla characters in the text."""
+        if not text:
+            return 0.0, 0
+        tokens = [ch for ch in text if not ch.isspace()]
+        ben_count = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
+        ratio = ben_count / max(len(tokens), 1)
+        return ratio, ben_count
+
+    def _flatten_background(self, image, clip=None):
+        clip_val = self.watermark_clip_threshold if clip is None else clip
+        return preproc.flatten_background(image, clip=clip_val)
 
     def _choose_psm(self, image, segment_count):
         return preproc.choose_psm(image, segment_count)
@@ -1084,15 +1082,27 @@ class PDFScraper:
                     try:
                         page = self.doc.pages[page_num]
 
-                        if TEXT_LAYER_FIRST:
+                        if self.text_layer_first:
                             langs = _split_langs(self.ocr_lang) or []
-                            text_layer = None
-                            # Only trust PDF text layer for non-Bengali jobs (or English-only).
-                            if "ben" not in langs:
-                                text_layer = self._extract_text_layer(page)
+                            text_layer = self._extract_text_layer(page)
                             if text_layer and len(text_layer) > 5:
-                                page_text = text_layer
-                                self.log(f"[Page {page_num + 1}] Used PDF text layer; OCR skipped")
+                                use_text_layer = False
+                                if "ben" in langs:
+                                    ratio, ben_count = self._bangla_ratio(text_layer)
+                                    use_text_layer = (
+                                        ratio >= self.text_layer_lang_min_ratio
+                                        and ben_count >= self.text_layer_min_ben_chars
+                                    )
+                                    if not use_text_layer:
+                                        self.log(
+                                            f"[Page {page_num + 1}] Text layer rejected (ben ratio {ratio:.2f}, chars {ben_count}); running OCR"
+                                        )
+                                else:
+                                    use_text_layer = True
+
+                                if use_text_layer:
+                                    page_text = text_layer
+                                    self.log(f"[Page {page_num + 1}] Used PDF text layer; OCR skipped")
 
                         if not page_text:
                             future = executor.submit(self._process_page_with_ocr, page_num)

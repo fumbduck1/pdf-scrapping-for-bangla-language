@@ -2,7 +2,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from constants import (
     DEFAULT_ZOOM,
@@ -103,38 +103,43 @@ class ConfigManager:
         return env_vars
     
     def from_dict(self, config_dict: Dict[str, Any]) -> JobConfig:
-        """Create job config from dictionary"""
+        """Create job config from dictionary. Accepts flat keys or nested sections (ocr/render/preprocess/text_layer)."""
+        ocr_section = config_dict.get("ocr", {}) if isinstance(config_dict.get("ocr", {}), dict) else {}
+        render_section = config_dict.get("render", {}) if isinstance(config_dict.get("render", {}), dict) else {}
+        preprocess_section = config_dict.get("preprocess", {}) if isinstance(config_dict.get("preprocess", {}), dict) else {}
+        text_layer_section = config_dict.get("text_layer", {}) if isinstance(config_dict.get("text_layer", {}), dict) else {}
+
         ocr_config = OCRConfig(
-            ocr_method=config_dict.get("ocr_method", "easyocr"),
-            ocr_lang=config_dict.get("ocr_lang", "ben"),
-            quality_mode=config_dict.get("quality_mode", QUALITY_MODE_DEFAULT),
-            fast_mode=config_dict.get("fast_mode", FAST_MODE),
-            fast_confidence_skip=config_dict.get("fast_confidence_skip", FAST_CONFIDENCE_SKIP),
-            tessdata_dir=config_dict.get("tessdata_dir"),
+            ocr_method=config_dict.get("ocr_method", ocr_section.get("ocr_method", "easyocr")),
+            ocr_lang=config_dict.get("ocr_lang", ocr_section.get("ocr_lang", "ben")),
+            quality_mode=config_dict.get("quality_mode", ocr_section.get("quality_mode", QUALITY_MODE_DEFAULT)),
+            fast_mode=config_dict.get("fast_mode", ocr_section.get("fast_mode", FAST_MODE)),
+            fast_confidence_skip=config_dict.get("fast_confidence_skip", ocr_section.get("fast_confidence_skip", FAST_CONFIDENCE_SKIP)),
+            tessdata_dir=config_dict.get("tessdata_dir", ocr_section.get("tessdata_dir")),
         )
         
         render_config = RenderConfig(
-            zoom=config_dict.get("zoom", DEFAULT_ZOOM),
-            high_dpi_zoom=config_dict.get("high_dpi_zoom", HIGH_DPI_ZOOM),
-            high_dpi_retry_conf=config_dict.get("high_dpi_retry_conf", HIGH_DPI_RETRY_CONF),
-            pdf_bytes_cache_mb=config_dict.get("pdf_bytes_cache_mb", PDF_BYTES_CACHE_MB),
-            persist_renders=config_dict.get("persist_renders", False),
+            zoom=config_dict.get("zoom", render_section.get("zoom", DEFAULT_ZOOM)),
+            high_dpi_zoom=config_dict.get("high_dpi_zoom", render_section.get("high_dpi_zoom", HIGH_DPI_ZOOM)),
+            high_dpi_retry_conf=config_dict.get("high_dpi_retry_conf", render_section.get("high_dpi_retry_conf", HIGH_DPI_RETRY_CONF)),
+            pdf_bytes_cache_mb=config_dict.get("pdf_bytes_cache_mb", render_section.get("pdf_bytes_cache_mb", PDF_BYTES_CACHE_MB)),
+            persist_renders=config_dict.get("persist_renders", render_section.get("persist_renders", False)),
         )
         
         preprocess_config = PreprocessConfig(
-            header_footer_crop_pct=config_dict.get("header_footer_crop_pct", HEADER_FOOTER_CROP_PCT),
-            watermark_flatten=config_dict.get("watermark_flatten", WATERMARK_FLATTEN),
-            watermark_clip_threshold=config_dict.get("watermark_clip_threshold", WATERMARK_CLIP_THRESHOLD),
-            watermark_retry_conf=config_dict.get("watermark_retry_conf", WATERMARK_RETRY_CONF),
-            quantize_levels=config_dict.get("quantize_levels", QUANTIZE_LEVELS),
-            quantize_dither=config_dict.get("quantize_dither", QUANTIZE_DITHER),
-            third_pass_scale=config_dict.get("third_pass_scale", THIRD_PASS_SCALE),
+            header_footer_crop_pct=config_dict.get("header_footer_crop_pct", preprocess_section.get("header_footer_crop_pct", HEADER_FOOTER_CROP_PCT)),
+            watermark_flatten=config_dict.get("watermark_flatten", preprocess_section.get("watermark_flatten", WATERMARK_FLATTEN)),
+            watermark_clip_threshold=config_dict.get("watermark_clip_threshold", preprocess_section.get("watermark_clip_threshold", WATERMARK_CLIP_THRESHOLD)),
+            watermark_retry_conf=config_dict.get("watermark_retry_conf", preprocess_section.get("watermark_retry_conf", WATERMARK_RETRY_CONF)),
+            quantize_levels=config_dict.get("quantize_levels", preprocess_section.get("quantize_levels", QUANTIZE_LEVELS)),
+            quantize_dither=config_dict.get("quantize_dither", preprocess_section.get("quantize_dither", QUANTIZE_DITHER)),
+            third_pass_scale=config_dict.get("third_pass_scale", preprocess_section.get("third_pass_scale", THIRD_PASS_SCALE)),
         )
         
         text_layer_config = TextLayerConfig(
-            text_layer_first=config_dict.get("text_layer_first", TEXT_LAYER_FIRST),
-            text_layer_lang_min_ratio=config_dict.get("text_layer_lang_min_ratio", TEXT_LAYER_LANG_MIN_RATIO),
-            text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS),
+            text_layer_first=config_dict.get("text_layer_first", text_layer_section.get("text_layer_first", TEXT_LAYER_FIRST)),
+            text_layer_lang_min_ratio=config_dict.get("text_layer_lang_min_ratio", text_layer_section.get("text_layer_lang_min_ratio", TEXT_LAYER_LANG_MIN_RATIO)),
+            text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", text_layer_section.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS)),
         )
         
         return JobConfig(
@@ -246,9 +251,9 @@ class ConfigManager:
         
         return self.from_dict(config_dict)
     
-    def validate_config(self, config: JobConfig) -> Dict[str, str]:
-        """Validate configuration"""
-        errors = []
+    def validate_config(self, config: JobConfig) -> List[str]:
+        """Validate configuration and return a list of error messages."""
+        errors: List[str] = []
         
         # Validate paths
         if not config.pdf_path:
