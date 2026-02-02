@@ -8,6 +8,8 @@ from pathlib import Path
 from datetime import datetime
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from PIL import Image, ImageFilter
 Image.MAX_IMAGE_PIXELS = 500_000_000
@@ -36,6 +38,7 @@ from constants import (
     HEADER_FOOTER_CROP_PCT,
     QUANTIZE_LEVELS,
     QUANTIZE_DITHER,
+    RENDER_CACHE_MAX_ITEMS,
 )
 from config_manager import JobConfig
 import preprocess as preproc
@@ -50,17 +53,36 @@ from deps import (
     detect_poppler_path,
     detect_torch_device,
 )
-from utils import _sanitize_tessdata_prefix, _split_langs, validate_runtime_env, resolve_tesseract_cmd
+from utils import (
+    _sanitize_tessdata_prefix,
+    _split_langs,
+    validate_runtime_env,
+    resolve_tesseract_cmd,
+    normalize_text,
+    bangla_ratio,
+)
 from performance import get_monitor, timer, profile, register_metrics
 
 # Register performance metrics
 register_metrics()
 
 
+@dataclass
+class PageResult:
+    page_number: int
+    content: str = ""
+    ocr_page_text: str = ""
+    ocr_page_confidence: float = 0.0
+    ocr_page_fragments: int = 0
+    ocr_render: str = ""
+    warning: str = ""
+    error: str = ""
+
+
 class PdfRenderer:
     """Rendering helper to manage PDF handles and page rasterization with caching."""
 
-    def __init__(self, pdf_path, output_dir, pdf_bytes_cache_mb, poppler_path, log, log_error, persist_renders=False):
+    def __init__(self, pdf_path, output_dir, pdf_bytes_cache_mb, poppler_path, log, log_error, persist_renders=False, render_cache_max_items=RENDER_CACHE_MAX_ITEMS):
         self.pdf_path = pdf_path
         self.output_dir = output_dir
         self.renders_dir = None
@@ -72,10 +94,11 @@ class PdfRenderer:
         self.log = log
         self.log_error = log_error
         self.persist_renders = persist_renders
+        self.render_cache_max_items = max(int(render_cache_max_items or 0), 0)
         self.setup_directories()
-        
-        # Page cache for rendered images
-        self._render_cache = {}
+
+        # Page cache for rendered images (bounded LRU)
+        self._render_cache = OrderedDict() if self.render_cache_max_items > 0 else None
 
     def setup_directories(self):
         if not self.persist_renders:
@@ -114,8 +137,10 @@ class PdfRenderer:
         """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
         # Check if we have a cached render
         cache_key = (page_num, zoom, fmt)
-        if cache_key in self._render_cache:
-            return self._render_cache[cache_key]
+        if self._render_cache is not None and cache_key in self._render_cache:
+            cached_val = self._render_cache.pop(cache_key)
+            self._render_cache[cache_key] = cached_val
+            return cached_val
             
         convert_from_path, convert_from_bytes = _lazy_import_pdf2image()
         if not convert_from_path or not convert_from_bytes:
@@ -155,8 +180,11 @@ class PdfRenderer:
                 except Exception:
                     render_path = None
 
-            # Cache the render
-            self._render_cache[cache_key] = (render_img, render_path)
+            # Cache the render (bounded LRU)
+            if self._render_cache is not None:
+                self._render_cache[cache_key] = (render_img, render_path)
+                if len(self._render_cache) > self.render_cache_max_items:
+                    self._render_cache.popitem(last=False)
             
             return render_img, render_path
         except Exception as e:
@@ -181,6 +209,9 @@ class PdfRenderer:
         self._pdf_file_handle = None
         self._pdf_bytes = None
         self.doc = None
+        # Clear render cache to release PIL Image resources and prevent OOM
+        if self._render_cache is not None:
+            self._render_cache.clear()
 
     def _log_missing(self, msg, err_key=None):
         try:
@@ -244,12 +275,7 @@ class OcrPipeline:
 
     # --- shared helpers ---
     def _normalize_text(self, text):
-        if not text:
-            return ""
-        zero_width = ['\u200b', '\u200c', '\u200d', '\ufeff']
-        for zw in zero_width:
-            text = text.replace(zw, '')
-        return '\n'.join(' '.join(line.split()) for line in text.splitlines())
+        return normalize_text(text)
 
     def _maybe_split_columns(self, image):
         return preproc.maybe_split_columns(image, fast_mode=self.fast_mode)
@@ -642,6 +668,9 @@ class PDFScraper:
         text_layer_first=TEXT_LAYER_FIRST,
         text_layer_lang_min_ratio=TEXT_LAYER_LANG_MIN_RATIO,
         text_layer_min_ben_chars=TEXT_LAYER_MIN_BEN_CHARS,
+        render_cache_max_items=RENDER_CACHE_MAX_ITEMS,
+        share_ocr_instances=True,
+        ocr_pipeline_factory=None,
     ):
         """Initialize PDF scraper."""
         self.pdf_path = pdf_path
@@ -673,6 +702,7 @@ class PDFScraper:
         self.text_layer_first = text_layer_first
         self.text_layer_lang_min_ratio = text_layer_lang_min_ratio
         self.text_layer_min_ben_chars = text_layer_min_ben_chars
+        self.share_ocr_instances = bool(share_ocr_instances)
         self.progress_callback = progress_callback
         self.stop_event = stop_event
         self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
@@ -686,6 +716,8 @@ class PDFScraper:
         os.makedirs(self.output_dir, exist_ok=True)
         from logger import get_logger
         self.logger = get_logger()
+        # Cache guardrail: cap or disable cache; allow overrides for testing/memory constraints
+        effective_cache_cap = max(int(render_cache_max_items or 0), 0)
         self.renderer = PdfRenderer(
             pdf_path=self.pdf_path,
             output_dir=self.output_dir,
@@ -694,8 +726,46 @@ class PDFScraper:
             log=self.log,
             log_error=self.log_error,
             persist_renders=self.persist_renders,
+            render_cache_max_items=effective_cache_cap,
         )
-        self.ocr = OcrPipeline(
+        self._ocr_factory = ocr_pipeline_factory or self._build_ocr_pipeline
+        self.ocr = self._ocr_factory()
+
+    @classmethod
+    def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
+        """Construct a PDFScraper directly from a JobConfig to reduce call-site wiring."""
+        return cls(
+            pdf_path=job_config.pdf_path,
+            output_dir=os.path.join(job_config.output_root, Path(job_config.pdf_path).stem),
+            use_ocr=job_config.use_ocr,
+            ocr_method=job_config.ocr.ocr_method,
+            ocr_lang=job_config.ocr.ocr_lang,
+            quality_mode=job_config.ocr.quality_mode,
+            fast_mode=job_config.ocr.fast_mode,
+            fast_confidence_skip=job_config.ocr.fast_confidence_skip,
+            tessdata_dir=job_config.ocr.tessdata_dir,
+            persist_renders=job_config.render.persist_renders,
+            pdf_bytes_cache_mb=job_config.render.pdf_bytes_cache_mb,
+            zoom=job_config.render.zoom,
+            high_dpi_zoom=job_config.render.high_dpi_zoom,
+            high_dpi_retry_conf=job_config.render.high_dpi_retry_conf,
+            header_footer_crop_pct=job_config.preprocess.header_footer_crop_pct,
+            watermark_flatten=job_config.preprocess.watermark_flatten,
+            watermark_clip_threshold=job_config.preprocess.watermark_clip_threshold,
+            watermark_retry_conf=job_config.preprocess.watermark_retry_conf,
+            quantize_levels=job_config.preprocess.quantize_levels,
+            quantize_dither=job_config.preprocess.quantize_dither,
+            third_pass_scale=job_config.preprocess.third_pass_scale,
+            text_layer_first=job_config.text_layer.text_layer_first,
+            text_layer_lang_min_ratio=job_config.text_layer.text_layer_lang_min_ratio,
+            text_layer_min_ben_chars=job_config.text_layer.text_layer_min_ben_chars,
+            max_workers=job_config.max_workers,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
+        )
+
+    def _build_ocr_pipeline(self):
+        return OcrPipeline(
             ocr_method=self.ocr_method,
             ocr_lang=self.ocr_lang,
             quality_mode=self.quality_mode,
@@ -708,6 +778,11 @@ class PDFScraper:
             watermark_flatten=self.watermark_flatten,
             watermark_clip_threshold=self.watermark_clip_threshold,
         )
+
+    def _get_ocr_pipeline(self):
+        if self.share_ocr_instances and self.ocr:
+            return self.ocr
+        return self._ocr_factory()
     
     def setup_directories(self):
         """Create all necessary directories upfront."""
@@ -850,24 +925,23 @@ class PDFScraper:
         render_img = None
         render_path = None
         page_level_ocr = None
+        ocr_engine = self._get_ocr_pipeline()
         
         try:
             render_result = self.render_page_to_image(page_num)
             if not render_result:
-                return page_num, {
-                    'page_number': page_num,
-                    'content': "",
-                    'warning': 'Rendering unavailable; raster OCR skipped',
-                    'ocr_page_confidence': 0.0,
-                    'ocr_page_fragments': 0,
-                }
+                return page_num, PageResult(
+                    page_number=page_num,
+                    content="",
+                    warning='Rendering unavailable; raster OCR skipped',
+                )
             if isinstance(render_result, tuple):
                 render_img, render_path = render_result
             else:
                 render_img = render_result
                 render_path = None
             
-            page_level_ocr = self.ocr.extract_text_with_ocr(render_img)
+            page_level_ocr = ocr_engine.extract_text_with_ocr(render_img)
             
             if page_level_ocr:
                 confidence = page_level_ocr.get('avg_confidence', 0)
@@ -886,7 +960,7 @@ class PDFScraper:
                             else:
                                 hi_img, hi_path = hi_render, None
 
-                            hi_ocr = self.ocr.extract_text_with_ocr(hi_img)
+                            hi_ocr = ocr_engine.extract_text_with_ocr(hi_img)
                             if self._score_result(hi_ocr) > self._score_result(page_level_ocr):
                                 page_level_ocr = hi_ocr
                                 render_img = hi_img
@@ -901,16 +975,14 @@ class PDFScraper:
                         self.log(f"[Page {page_num + 1}] High-DPI retry failed: {retry_err}")
 
             page_text = page_level_ocr['text'] if page_level_ocr else ""
-            page_data = {
-                'page_number': page_num,
-                'content': page_text,
-            }
-
-            if page_level_ocr:
-                page_data['ocr_page_text'] = page_level_ocr['text']
-                page_data['ocr_page_confidence'] = page_level_ocr['avg_confidence']
-                page_data['ocr_page_fragments'] = page_level_ocr['fragments']
-                page_data['ocr_render'] = os.path.relpath(render_path, self.output_dir) if render_path else None
+            page_data = PageResult(
+                page_number=page_num,
+                content=page_text,
+                ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+            )
 
             return page_num, page_data
             
@@ -919,31 +991,19 @@ class PDFScraper:
             self.log(error_msg)
             self.log_error(error_msg)
             
-            return page_num, {
-                'page_number': page_num,
-                'content': "",
-                'error': str(e),
-                'ocr_page_confidence': 0.0,
-                'ocr_page_fragments': 0
-            }
+            return page_num, PageResult(
+                page_number=page_num,
+                content="",
+                error=str(e),
+            )
 
     def _normalize_text(self, text):
         """Strip zero-width characters and normalize whitespace."""
-        if not text:
-            return ""
-        zero_width = ['\u200b', '\u200c', '\u200d', '\ufeff']
-        for zw in zero_width:
-            text = text.replace(zw, '')
-        return '\n'.join(' '.join(line.split()) for line in text.splitlines())
+        return normalize_text(text)
 
     def _bangla_ratio(self, text: str):
         """Return (ratio, count) of Bangla characters in the text."""
-        if not text:
-            return 0.0, 0
-        tokens = [ch for ch in text if not ch.isspace()]
-        ben_count = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
-        ratio = ben_count / max(len(tokens), 1)
-        return ratio, ben_count
+        return bangla_ratio(text)
 
     def _flatten_background(self, image, clip=None):
         clip_val = self.watermark_clip_threshold if clip is None else clip
@@ -956,7 +1016,7 @@ class PDFScraper:
         """Fast path: pull native text from the PDF; returns normalized string or ''."""
         try:
             raw = page.extract_text() or ""
-            normalized = self._normalize_text(raw)
+            normalized = normalize_text(raw)
             return normalized
         except Exception:
             return ""
@@ -977,6 +1037,16 @@ class PDFScraper:
             log=self.log,
             log_error=self.log_error,
         )
+    
+    def _get_easyocr_reader(self):
+        """Delegate to OCR pipeline's _get_easyocr_reader method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._get_easyocr_reader()
+    
+    def _run_easyocr_pass(self, image):
+        """Delegate to OCR pipeline's _run_easyocr_pass method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._run_easyocr_pass(image)
 
     @timer("page_processing")
     def scrape_all_pages(self):
@@ -1046,18 +1116,14 @@ class PDFScraper:
                     preview_len = len(page_text)
                     self.log(f"[Page {page_num + 1}] OCR complete (chars: {preview_len})")
 
-                    page_data = {
-                        'page_number': page_num,
-                        'content': page_text,
-                    }
-
-                    if page_level_ocr:
-                        page_data['ocr_page_text'] = page_level_ocr['text']
-                        page_data['ocr_page_confidence'] = page_level_ocr['avg_confidence']
-                        page_data['ocr_page_fragments'] = page_level_ocr['fragments']
-                        page_data['ocr_render'] = os.path.relpath(render_path, self.output_dir) if render_path else None
-
-                    page_results[page_num] = page_data
+                    page_results[page_num] = PageResult(
+                        page_number=page_num,
+                        content=page_text,
+                        ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                        ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                        ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                        ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+                    )
 
                 for fut in as_completed(ocr_futures):
                     try:
@@ -1071,12 +1137,21 @@ class PDFScraper:
 
             for page_num in sorted(page_results.keys()):
                 page_data = page_results[page_num]
-                self.results['pages'][f'page_{page_num}'] = page_data
-                preview_len = len(page_data.get('content', '') or '')
+                self.results['pages'][f'page_{page_num}'] = {
+                    'page_number': page_data.page_number,
+                    'content': page_data.content,
+                    'ocr_page_text': page_data.ocr_page_text,
+                    'ocr_page_confidence': page_data.ocr_page_confidence,
+                    'ocr_page_fragments': page_data.ocr_page_fragments,
+                    'ocr_render': page_data.ocr_render or None,
+                    'warning': page_data.warning,
+                    'error': page_data.error,
+                }
+                preview_len = len(page_data.content or '')
                 self.log(f"[Page {page_num + 1}] OCR merged (chars: {preview_len})")
             
             total_page_ocr = sum(len(p.get('ocr_page_text', '')) for p in self.results['pages'].values())
-            pages_with_ocr = sum(1 for p in self.results['pages'].values() if 'ocr_page_text' in p)
+            pages_with_ocr = sum(1 for p in self.results['pages'].values() if p.get('ocr_page_text'))
             
             self.results['statistics'] = {
                 'total_pages': total_pages,
@@ -1241,35 +1316,7 @@ def run_pdf_job(job_config: JobConfig, stop_event, log_cb):
     pdf_output = os.path.join(job_config.output_root, pdf_name)
     scraper = None
     try:
-        scraper = PDFScraper(
-            job_config.pdf_path,
-            pdf_output,
-            use_ocr=job_config.use_ocr,
-            ocr_method=job_config.ocr.ocr_method,
-            ocr_lang=job_config.ocr.ocr_lang,
-            quality_mode=job_config.ocr.quality_mode,
-            fast_mode=job_config.ocr.fast_mode,
-            fast_confidence_skip=job_config.ocr.fast_confidence_skip,
-            tessdata_dir=job_config.ocr.tessdata_dir,
-            persist_renders=job_config.render.persist_renders,
-            pdf_bytes_cache_mb=job_config.render.pdf_bytes_cache_mb,
-            zoom=job_config.render.zoom,
-            high_dpi_zoom=job_config.render.high_dpi_zoom,
-            high_dpi_retry_conf=job_config.render.high_dpi_retry_conf,
-            header_footer_crop_pct=job_config.preprocess.header_footer_crop_pct,
-            watermark_flatten=job_config.preprocess.watermark_flatten,
-            watermark_clip_threshold=job_config.preprocess.watermark_clip_threshold,
-            watermark_retry_conf=job_config.preprocess.watermark_retry_conf,
-            quantize_levels=job_config.preprocess.quantize_levels,
-            quantize_dither=job_config.preprocess.quantize_dither,
-            third_pass_scale=job_config.preprocess.third_pass_scale,
-            text_layer_first=job_config.text_layer.text_layer_first,
-            text_layer_lang_min_ratio=job_config.text_layer.text_layer_lang_min_ratio,
-            text_layer_min_ben_chars=job_config.text_layer.text_layer_min_ben_chars,
-            max_workers=job_config.max_workers,
-            progress_callback=log_cb,
-            stop_event=stop_event,
-        )
+        scraper = PDFScraper.from_job_config(job_config, progress_callback=log_cb, stop_event=stop_event)
         if log_cb:
             log_cb("Scraping PDF...")
         scrape_ok = scraper.scrape_all_pages()
