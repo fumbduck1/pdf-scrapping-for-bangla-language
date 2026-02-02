@@ -47,9 +47,9 @@ def quantize_params(ocr_lang: str, fast_mode: bool) -> Tuple[int, bool]:
 def crop_header_footer(image, pct: float = HEADER_FOOTER_CROP_PCT):
     """Remove top/bottom bands to drop running headers/footers."""
     try:
-        if pct <= 0:
-            return image
         img = image if isinstance(image, Image.Image) else Image.open(image)
+        if pct <= 0:
+            return img
         w, h = img.size
         band = int(h * pct)
         top = band
@@ -58,7 +58,7 @@ def crop_header_footer(image, pct: float = HEADER_FOOTER_CROP_PCT):
             return img
         return img.crop((0, top, w, bottom))
     except Exception:
-        return image
+        return image if isinstance(image, Image.Image) else None
 
 
 def flatten_background(image, clip=WATERMARK_CLIP_THRESHOLD):
@@ -232,7 +232,7 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
                 log_fn(f"Preprocessing error: {e}")
             except Exception:
                 pass
-        return Image.open(image_or_path) if not isinstance(image_or_path, Image.Image) else image_or_path
+        return None if not isinstance(image_or_path, Image.Image) else image_or_path
 
 
 __all__ = [

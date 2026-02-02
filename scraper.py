@@ -9,7 +9,7 @@ from datetime import datetime
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 from PIL import Image, ImageFilter
 Image.MAX_IMAGE_PIXELS = 500_000_000
@@ -99,6 +99,7 @@ class PdfRenderer:
 
         # Page cache for rendered images (bounded LRU)
         self._render_cache = OrderedDict() if self.render_cache_max_items > 0 else None
+        self._render_cache_lock = threading.Lock()
 
     def setup_directories(self):
         if not self.persist_renders:
@@ -135,15 +136,27 @@ class PdfRenderer:
     @timer("pdf_rendering")
     def render_page(self, page_num, zoom, fmt="png"):
         """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
-        # Check if we have a cached render
+        # Check if we have a cached render (atomic operation)
         cache_key = (page_num, zoom, fmt)
-        if self._render_cache is not None and cache_key in self._render_cache:
-            cached_val = self._render_cache.pop(cache_key)
-            self._render_cache[cache_key] = cached_val
-            return cached_val
-            
+        if self._render_cache is not None:
+            with self._render_cache_lock:
+                if cache_key in self._render_cache:
+                    cached_val = self._render_cache.pop(cache_key)
+                    self._render_cache[cache_key] = cached_val
+                    return cached_val
+                
+                # If not in cache, add a placeholder to prevent duplicate renders
+                # by other threads
+                PENDING = object()
+                self._render_cache[cache_key] = PENDING
+                
         convert_from_path, convert_from_bytes = _lazy_import_pdf2image()
         if not convert_from_path or not convert_from_bytes:
+            # Cleanup the placeholder if we failed to import
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    if self._render_cache.get(cache_key) is PENDING:
+                        del self._render_cache[cache_key]
             self._log_missing("pdf2image not installed. Install with: pip install pdf2image", err_key="pdf2image")
             return None
         dpi = int((zoom or DEFAULT_ZOOM) * 72)
@@ -180,13 +193,32 @@ class PdfRenderer:
                 except Exception:
                     render_path = None
 
-            # Cache the render (bounded LRU)
+            # Cache the render (atomic operation)
             if self._render_cache is not None:
-                self._render_cache[cache_key] = (render_img, render_path)
-                if len(self._render_cache) > self.render_cache_max_items:
-                    self._render_cache.popitem(last=False)
+                with self._render_cache_lock:
+                    # Check if the entry is still our placeholder
+                    if self._render_cache.get(cache_key) is PENDING:
+                        # Replace placeholder with actual render
+                        self._render_cache[cache_key] = (render_img, render_path)
+                        if len(self._render_cache) > self.render_cache_max_items:
+                            # Explicitly close the oldest image before removing from cache
+                            old_img, _ = self._render_cache.popitem(last=False)
+                            if hasattr(old_img, 'close'):
+                                old_img.close()
+                    else:
+                        # If another thread already replaced the placeholder,
+                        # use that instead of the one we just rendered
+                        render_img.close()
+                        render_img, render_path = self._render_cache[cache_key]
             
             return render_img, render_path
+        except Exception as e:
+            # Cleanup the placeholder if rendering failed
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    if self._render_cache.get(cache_key) is PENDING:
+                        del self._render_cache[cache_key]
+            raise
         except Exception as e:
             self._log_error(f"Render error (page {page_num + 1}): {e}")
             return None
@@ -211,7 +243,11 @@ class PdfRenderer:
         self.doc = None
         # Clear render cache to release PIL Image resources and prevent OOM
         if self._render_cache is not None:
-            self._render_cache.clear()
+            with self._render_cache_lock:
+                for render_img, _ in self._render_cache.values():
+                    if hasattr(render_img, 'close'):
+                        render_img.close()
+                self._render_cache.clear()
 
     def _log_missing(self, msg, err_key=None):
         try:
@@ -435,7 +471,11 @@ class OcrPipeline:
         try:
             raw_img = self._load_image(image_path_or_image)
             cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
             preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
@@ -521,7 +561,11 @@ class OcrPipeline:
         try:
             raw_img = self._load_image(image_path_or_image)
             cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
             preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
@@ -716,6 +760,22 @@ class PDFScraper:
         os.makedirs(self.output_dir, exist_ok=True)
         from logger import get_logger
         self.logger = get_logger()
+        
+        # Warn about potential memory issues with parallel processing and separate OCR instances
+        worker_count = self._worker_count()
+        if not self.share_ocr_instances and worker_count > 1:
+            warning_msg = (
+                "WARNING: share_ocr_instances is False and scraper is configured to run with "
+                f"{worker_count} workers. This will create {worker_count} separate OCR pipeline "
+                "instances (each with their own heavy EasyOCR reader), which may cause "
+                "significant memory usage and potential blowups. Consider setting share_ocr_instances=True "
+                "if you encounter memory issues during parallel processing."
+            )
+            if self.logger:
+                self.logger.warning(warning_msg)
+            # Also log to extraction log
+            self.results['extraction_log'].append(warning_msg)
+        
         # Cache guardrail: cap or disable cache; allow overrides for testing/memory constraints
         effective_cache_cap = max(int(render_cache_max_items or 0), 0)
         self.renderer = PdfRenderer(
@@ -1137,16 +1197,12 @@ class PDFScraper:
 
             for page_num in sorted(page_results.keys()):
                 page_data = page_results[page_num]
-                self.results['pages'][f'page_{page_num}'] = {
-                    'page_number': page_data.page_number,
-                    'content': page_data.content,
-                    'ocr_page_text': page_data.ocr_page_text,
-                    'ocr_page_confidence': page_data.ocr_page_confidence,
-                    'ocr_page_fragments': page_data.ocr_page_fragments,
-                    'ocr_render': page_data.ocr_render or None,
-                    'warning': page_data.warning,
-                    'error': page_data.error,
-                }
+                # Convert PageResult to dictionary using asdict to ensure all fields are in sync
+                page_dict = asdict(page_data)
+                # Set ocr_render to None if falsy (empty string) for consistency
+                if not page_dict.get('ocr_render'):
+                    page_dict['ocr_render'] = None
+                self.results['pages'][f'page_{page_num}'] = page_dict
                 preview_len = len(page_data.content or '')
                 self.log(f"[Page {page_num + 1}] OCR merged (chars: {preview_len})")
             

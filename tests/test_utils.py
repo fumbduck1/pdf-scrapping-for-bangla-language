@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import (
     _sanitize_tessdata_prefix,
     _split_langs,
+    normalize_text,
+    bangla_ratio,
     resolve_tesseract_cmd,
     check_tesseract_ready,
     validate_runtime_env,
@@ -55,6 +57,21 @@ class TestUtils(unittest.TestCase):
         errors, warnings = validate_runtime_env()
         self.assertIsInstance(errors, list)
         self.assertIsInstance(warnings, list)
+
+    def test_normalize_text_zero_width_and_spaces(self):
+        """normalize_text should strip zero-width chars and collapse whitespace."""
+        raw = "Hello\u200b  world\u200c\nThis   is\t\u200d fine"
+        normalized = normalize_text(raw)
+        self.assertEqual(normalized, "Hello world\nThis is fine")
+
+    def test_bangla_ratio(self):
+        """bangla_ratio returns ratio/count for Bangla script characters."""
+        ratio, count = bangla_ratio("বাংলা test")
+        self.assertGreater(ratio, 0.0)
+        self.assertGreater(count, 0)
+        ratio2, count2 = bangla_ratio("")
+        self.assertEqual(ratio2, 0.0)
+        self.assertEqual(count2, 0)
     
     def test_summarize_env(self):
         """Test environment summary"""

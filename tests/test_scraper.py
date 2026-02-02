@@ -7,8 +7,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config_manager import JobConfig, OCRConfig, RenderConfig
-from scraper import PdfRenderer, OcrPipeline
+from scraper import PdfRenderer, OcrPipeline, PDFScraper
 from deps import PDF2IMAGE_AVAILABLE, PYPDF_AVAILABLE
+from PIL import Image
+from unittest import mock
 
 
 class TestPdfRenderer(unittest.TestCase):
@@ -123,6 +125,96 @@ class TestScraperIntegration(unittest.TestCase):
         self.assertEqual(config.ocr.ocr_method, "easyocr")
         self.assertEqual(config.ocr.ocr_lang, "ben")
         self.assertTrue(config.ocr.quality_mode)
+
+    def test_pdfscraper_from_job_config_output_dir(self):
+        """Ensure from_job_config wires fields and derives output_dir consistently."""
+        cfg = JobConfig(
+            pdf_path="/tmp/sample.pdf",
+            output_root="/out",
+            use_ocr=True,
+            ocr=OCRConfig(ocr_method="easyocr", ocr_lang="ben", quality_mode=True),
+            render=RenderConfig(persist_renders=False, pdf_bytes_cache_mb=10),
+        )
+        scraper = PDFScraper.from_job_config(cfg)
+        self.assertEqual(scraper.output_dir.replace("\\", "/"), "/out/sample")
+        self.assertEqual(scraper.ocr_lang, "ben")
+        self.assertEqual(scraper.ocr_method, "easyocr")
+
+
+class TestRendererCache(unittest.TestCase):
+    """Tests for bounded render cache behavior."""
+
+    def test_render_cache_lru_eviction(self):
+        renderer = PdfRenderer(
+            pdf_path="/dev/null",
+            output_dir="/tmp",
+            pdf_bytes_cache_mb=1,
+            poppler_path=None,
+            log=None,
+            log_error=None,
+            persist_renders=False,
+            render_cache_max_items=2,
+        )
+
+        dummy_img = Image.new("RGB", (10, 10))
+
+        def fake_from_bytes(*args, **kwargs):
+            return [dummy_img]
+
+        def fake_from_path(*args, **kwargs):
+            return [dummy_img]
+
+        renderer._pdf_bytes = b"%PDF-1.4"  # force convert_from_bytes path
+
+        with mock.patch("scraper._lazy_import_pdf2image", return_value=(fake_from_path, fake_from_bytes)):
+            renderer.render_page(0, 1.0)
+            renderer.render_page(1, 1.0)
+            renderer.render_page(2, 1.0)
+
+        cache_keys = list(renderer._render_cache.keys())
+        self.assertEqual(len(cache_keys), 2)
+        self.assertEqual(cache_keys, [(1, 1.0, "png"), (2, 1.0, "png")])
+
+
+class TestOcrFactorySharing(unittest.TestCase):
+    """Ensure OCR factory sharing vs isolation works as configured."""
+
+    def test_ocr_factory_share_toggle(self):
+        class DummyOCR:
+            def __init__(self):
+                self.calls = 0
+
+            def extract_text_with_ocr(self, img):
+                self.calls += 1
+                return None
+
+        factory_calls = []
+
+        def factory():
+            inst = DummyOCR()
+            factory_calls.append(inst)
+            return inst
+
+        scraper_shared = PDFScraper(
+            pdf_path="/tmp/a.pdf",
+            output_dir="/tmp/out",
+            ocr_pipeline_factory=factory,
+            share_ocr_instances=True,
+        )
+        o1 = scraper_shared._get_ocr_pipeline()
+        o2 = scraper_shared._get_ocr_pipeline()
+        self.assertIs(o1, o2)
+
+        scraper_isolated = PDFScraper(
+            pdf_path="/tmp/b.pdf",
+            output_dir="/tmp/out2",
+            ocr_pipeline_factory=factory,
+            share_ocr_instances=False,
+        )
+        o3 = scraper_isolated._get_ocr_pipeline()
+        o4 = scraper_isolated._get_ocr_pipeline()
+        self.assertIsNot(o3, o4)
+        self.assertGreaterEqual(len(factory_calls), 3)
 
 
 if __name__ == "__main__":

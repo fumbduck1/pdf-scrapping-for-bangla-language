@@ -4,6 +4,8 @@ import shutil
 from pathlib import Path
 from typing import List, Tuple
 
+ZERO_WIDTH_CHARS = ['\u200b', '\u200c', '\u200d', '\ufeff']
+
 from deps import (
     _lazy_import_pdf2image,
     _lazy_import_pypdf,
@@ -33,6 +35,31 @@ def _split_langs(lang_value: str) -> List[str]:
         return []
     parts = lang_value.replace(',', '+').split('+')
     return [p.strip() for p in parts if p.strip()]
+
+
+def normalize_text(text: str) -> str:
+    """Strip zero-width chars and normalize whitespace to single spaces per line."""
+    if not text:
+        return ""
+    try:
+        for zw in ZERO_WIDTH_CHARS:
+            text = text.replace(zw, '')
+        return '\n'.join(' '.join(line.split()) for line in text.splitlines())
+    except Exception:
+        return text
+
+
+def bangla_ratio(text: str) -> Tuple[float, int]:
+    """Return (ratio, count) of Bangla chars in the text (ignoring whitespace)."""
+    if not text:
+        return 0.0, 0
+    try:
+        tokens = [ch for ch in text if not ch.isspace()]
+        ben_count = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
+        ratio = ben_count / max(len(tokens), 1)
+        return ratio, ben_count
+    except Exception:
+        return 0.0, 0
 
 
 def resolve_tesseract_cmd():
@@ -215,6 +242,8 @@ def print_env_report():
 __all__ = [
     "_sanitize_tessdata_prefix",
     "_split_langs",
+    "normalize_text",
+    "bangla_ratio",
     "resolve_tesseract_cmd",
     "check_tesseract_ready",
     "validate_runtime_env",
