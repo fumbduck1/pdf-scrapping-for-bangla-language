@@ -283,7 +283,7 @@ class MinimalGUI:
                 break
             self.log(f"[{idx + 1}/{total}] {Path(file_path).name}")
             job_config = create_job_config(
-                pdf_path=file_path,
+                input_path=file_path,
                 output_root=self.output_dir,
                 use_ocr=settings.use_ocr,
                 ocr_method=settings.ocr_method,

@@ -48,7 +48,7 @@ def test_epub_ocr_integration():
             # Try to use a system font
             draw.text((10, 20), "Hello World!", fill='black', font=ImageFont.truetype("arial.ttf", 30))
             draw.text((10, 60), "EPUB OCR Test", fill='black', font=ImageFont.truetype("arial.ttf", 24))
-        except:
+        except (OSError, IOError):
             # Fallback to default font if Arial not available
             draw.text((10, 20), "Hello World!", fill='black')
             draw.text((10, 60), "EPUB OCR Test", fill='black')
@@ -73,7 +73,7 @@ def test_epub_ocr_integration():
         print(f"Test EPUB file created: {test_epub_path}")
         
         job_config = create_job_config(
-            pdf_path=str(test_epub_path),
+            input_path=str(test_epub_path),
             output_root=str(temp_dir),
             use_ocr=True,
             ocr_method='easyocr',
@@ -91,7 +91,7 @@ def test_epub_ocr_integration():
         print(f"  Save OK: {result.get('save_ok')}")
         print(f"  Output directory: {result.get('output_dir')}")
         
-        if result.get('save_ok'):
+        if result.get('save_ok') and result.get('output_dir'):
             output_dir = Path(result.get('output_dir'))
             print(f"\nOutput files in {output_dir}:")
             for file in output_dir.glob('*'):

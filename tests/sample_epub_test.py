@@ -107,7 +107,7 @@ def test_scraper():
         from epub_scraper import run_epub_job
         
         job_config = create_job_config(
-            pdf_path=str(epub_path),
+            input_path=str(epub_path),
             output_root=str(temp_dir),
             use_ocr=False,
             ocr_method='easyocr',
@@ -125,7 +125,7 @@ def test_scraper():
         print(f"  Save OK: {result.get('save_ok')}")
         print(f"  Output directory: {result.get('output_dir')}")
         
-        if result.get('save_ok'):
+        if result.get('save_ok') and result.get('output_dir'):
             output_dir = Path(result.get('output_dir'))
             print(f"\nOutput files in {output_dir}:")
             for file in output_dir.glob('*'):

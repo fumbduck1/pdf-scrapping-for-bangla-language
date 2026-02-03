@@ -74,7 +74,7 @@ class TextLayerConfig:
 @dataclass
 class JobConfig:
     """Complete job configuration"""
-    pdf_path: str
+    input_path: str
     output_root: str
     use_ocr: bool = True
     ocr: OCRConfig = field(default_factory=OCRConfig)
@@ -86,7 +86,7 @@ class JobConfig:
     @property
     def file_type(self) -> str:
         """Determine file type from extension."""
-        ext = Path(self.pdf_path).suffix.lower()
+        ext = Path(self.input_path).suffix.lower()
         if ext == '.pdf':
             return 'pdf'
         elif ext == '.epub':
@@ -151,8 +151,10 @@ class ConfigManager:
             text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", text_layer_section.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS)),
         )
         
+        # Support both input_path and pdf_path for backward compatibility
+        input_path = config_dict.get("input_path", config_dict.get("pdf_path"))
         return JobConfig(
-            pdf_path=config_dict["pdf_path"],
+            input_path=input_path,
             output_root=config_dict["output_root"],
             use_ocr=config_dict.get("use_ocr", True),
             ocr=ocr_config,
@@ -169,8 +171,10 @@ class ConfigManager:
         
         config_dict = {}
         
-        if "pdf_path" in self._env_vars:
-            config_dict["pdf_path"] = self._env_vars["pdf_path"]
+        if "input_path" in self._env_vars:
+            config_dict["input_path"] = self._env_vars["input_path"]
+        elif "pdf_path" in self._env_vars:
+            config_dict["input_path"] = self._env_vars["pdf_path"]
         
         if "output_root" in self._env_vars:
             config_dict["output_root"] = self._env_vars["output_root"]
@@ -265,14 +269,14 @@ class ConfigManager:
         errors: List[str] = []
         
         # Validate paths
-        if not config.pdf_path:
-            errors.append("PDF path must be provided")
+        if not config.input_path:
+            errors.append("Input path must be provided")
         else:
-            pdf_path = Path(config.pdf_path)
-            if not pdf_path.exists():
-                errors.append(f"PDF file not found: {config.pdf_path}")
-            if pdf_path.suffix.lower() not in (".pdf", ".epub"):
-                errors.append(f"File must be a PDF or EPUB: {config.pdf_path}")
+            input_path = Path(config.input_path)
+            if not input_path.exists():
+                errors.append(f"Input file not found: {config.input_path}")
+            if input_path.suffix.lower() not in (".pdf", ".epub"):
+                errors.append(f"File must be a PDF or EPUB: {config.input_path}")
         
         if not config.output_root:
             errors.append("Output directory must be provided")
@@ -310,7 +314,7 @@ class ConfigManager:
     def get_default_config(self) -> JobConfig:
         """Get default configuration"""
         return JobConfig(
-            pdf_path="",
+            input_path="",
             output_root="",
             use_ocr=True,
             ocr=OCRConfig(),
@@ -329,10 +333,10 @@ def get_config_manager() -> ConfigManager:
     return config_manager
 
 
-def create_job_config(pdf_path: str, output_root: str, **kwargs) -> JobConfig:
+def create_job_config(input_path: str, output_root: str, **kwargs) -> JobConfig:
     """Create a new job configuration"""
     config_dict = {
-        "pdf_path": pdf_path,
+        "input_path": input_path,
         "output_root": output_root,
         **kwargs
     }

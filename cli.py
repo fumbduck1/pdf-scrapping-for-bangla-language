@@ -42,8 +42,8 @@ def main():
         config = config_manager.from_file(args.config)
         
         # Override config with command-line arguments if specified
-        if args.pdf:
-            config.pdf_path = args.pdf[0]
+        if args.files:
+            config.input_path = args.files[0]
         
         if args.output:
             config.output_root = args.output
@@ -72,7 +72,7 @@ def main():
             raise SystemExit("\n".join(errors))
         
         # Determine file type and run appropriate scraper
-        file_ext = Path(config.pdf_path).suffix.lower()
+        file_ext = Path(config.input_path).suffix.lower()
         if file_ext == '.pdf':
             from scraper import run_pdf_job
             result = run_pdf_job(config, stop_event=None, log_cb=print)
@@ -84,7 +84,7 @@ def main():
             return
             
         status = "ok" if result.get("save_ok") else "failed"
-        print(f"Done: {Path(config.pdf_path).name} [{status}] -> {result.get('output_dir')}")
+        print(f"Done: {Path(config.input_path).name} [{status}] -> {result.get('output_dir')}")
     else:
         # Process each file
         for file_path in args.files:
@@ -93,7 +93,7 @@ def main():
                 print(f"Skip missing file: {file_path}")
                 continue
             job = create_job_config(
-                pdf_path=str(file_path),
+                input_path=str(file_path),
                 output_root=args.output,
                 use_ocr=True,
                 ocr_method="easyocr",

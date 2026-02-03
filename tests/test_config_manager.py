@@ -26,7 +26,7 @@ class TestConfigManager(unittest.TestCase):
     def test_create_job_config(self):
         """Test creating a job config with create_job_config function"""
         config = create_job_config(
-            pdf_path="test.pdf",
+            input_path="test.pdf",
             output_root="output",
             use_ocr=True,
             ocr_method="easyocr",
@@ -38,7 +38,7 @@ class TestConfigManager(unittest.TestCase):
         )
         
         self.assertIsInstance(config, JobConfig)
-        self.assertEqual(config.pdf_path, "test.pdf")
+        self.assertEqual(config.input_path, "test.pdf")
         self.assertEqual(config.output_root, "output")
         self.assertTrue(config.use_ocr)
         self.assertEqual(config.ocr.ocr_method, "easyocr")
@@ -53,7 +53,7 @@ class TestConfigManager(unittest.TestCase):
         config = self.config_manager.get_default_config()
         
         self.assertIsInstance(config, JobConfig)
-        self.assertEqual(config.pdf_path, "")
+        self.assertEqual(config.input_path, "")
         self.assertEqual(config.output_root, "")
         self.assertTrue(config.use_ocr)
         self.assertEqual(config.ocr.ocr_method, "easyocr")
@@ -80,7 +80,7 @@ class TestConfigManager(unittest.TestCase):
             test_output_path.mkdir(exist_ok=True)
             
             config = create_job_config(
-                pdf_path=str(test_pdf_path),
+                input_path=str(test_pdf_path),
                 output_root=str(test_output_path)
             )
             
@@ -96,7 +96,7 @@ class TestConfigManager(unittest.TestCase):
     def test_from_dict(self):
         """Test creating config from dictionary"""
         config_dict = {
-            "pdf_path": "test.pdf",
+            "input_path": "test.pdf",
             "output_root": "output",
             "use_ocr": False,
             "ocr_method": "tesseract",
@@ -125,7 +125,7 @@ class TestConfigManager(unittest.TestCase):
         
         config = self.config_manager.from_dict(config_dict)
         
-        self.assertEqual(config.pdf_path, "test.pdf")
+        self.assertEqual(config.input_path, "test.pdf")
         self.assertEqual(config.output_root, "output")
         self.assertFalse(config.use_ocr)
         self.assertEqual(config.ocr.ocr_method, "tesseract")
@@ -173,7 +173,7 @@ class TestConfigManager(unittest.TestCase):
         try:
             config = self.config_manager.from_env()
             
-            self.assertEqual(config.pdf_path, "env_test.pdf")
+            self.assertEqual(config.input_path, "env_test.pdf")
             self.assertEqual(config.output_root, "env_output")
             self.assertFalse(config.use_ocr)
             self.assertEqual(config.ocr.ocr_method, "tesseract")

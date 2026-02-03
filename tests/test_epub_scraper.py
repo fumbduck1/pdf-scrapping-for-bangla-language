@@ -63,7 +63,7 @@ def test_run_epub_job():
         
         # Create job configuration
         job_config = create_job_config(
-            pdf_path=str(test_epub_path),
+            input_path=str(test_epub_path),
             output_root=str(temp_dir),
             use_ocr=True,
             ocr_method='easyocr',
@@ -137,7 +137,7 @@ def test_text_structure_preservation():
         
         # Create job configuration
         job_config = create_job_config(
-            pdf_path=str(test_epub_path),
+            input_path=str(test_epub_path),
             output_root=str(temp_dir),
             use_ocr=True,
             ocr_method='easyocr',

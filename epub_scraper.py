@@ -9,10 +9,12 @@ from collections import OrderedDict
 from dataclasses import dataclass, asdict
 
 from PIL import Image
-from ebooklib import epub
 
 from config_manager import JobConfig
 from deps import _lazy_import_epublib, EPUBLIB_AVAILABLE, EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
+
+# Lazy import for ebooklib to prevent ImportError when module not installed
+epub = None
 from scraper import PageResult
 from logger import get_logger
 
@@ -33,7 +35,15 @@ def run_epub_job(job_config: JobConfig, stop_event, log_cb) -> dict:
             log_cb("EPUB support not available: ebooklib library not installed")
         return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": job_config.output_root}
     
-    epub_name = Path(job_config.pdf_path).stem  # Using pdf_path for compatibility, will be renamed later
+    # Initialize ebooklib using lazy import
+    global epub
+    epub = _lazy_import_epublib()
+    if epub is None:
+        if log_cb:
+            log_cb("EPUB support not available: ebooklib library not installed")
+        return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": job_config.output_root}
+    
+    epub_name = Path(job_config.input_path).stem
     epub_output = os.path.join(job_config.output_root, epub_name)
     scraper = None
     try:
@@ -55,12 +65,12 @@ def run_epub_job(job_config: JobConfig, stop_event, log_cb) -> dict:
         if log_cb:
             log_cb(f"Error: {e}")
         if scraper:
-            scraper.log_error(f"Batch error on {job_config.pdf_path}: {e}")
+            scraper.log_error(f"Batch error on {job_config.input_path}: {e}")
         else:
             os.makedirs(epub_output, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(os.path.join(epub_output, "errors.log"), "a", encoding="utf-8") as f:
-                f.write(f"[{ts}] Batch error on {job_config.pdf_path}: {e}\n")
+                f.write(f"[{ts}] Batch error on {job_config.input_path}: {e}\n")
         return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": epub_output}
 
 
@@ -111,8 +121,8 @@ class EPUBScraper:
     def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
         """Construct an EPUBScraper directly from a JobConfig."""
         return cls(
-            epub_path=job_config.pdf_path,
-            output_dir=os.path.join(job_config.output_root, Path(job_config.pdf_path).stem),
+            epub_path=job_config.input_path,
+            output_dir=os.path.join(job_config.output_root, Path(job_config.input_path).stem),
             use_ocr=job_config.use_ocr,
             ocr_method=job_config.ocr.ocr_method,
             ocr_lang=job_config.ocr.ocr_lang,
@@ -196,7 +206,9 @@ class EPUBScraper:
         
         # Get spine items (correct reading order)
         spine_items = []
-        for item_id in self.book.spine:
+        for entry in self.book.spine:
+            # Extract item_id from spine entry (handle tuple format: (item_id, linear))
+            item_id = entry if isinstance(entry, str) else entry[0]
             item = self.book.get_item_with_id(item_id)
             if item:
                 spine_items.append(item)
@@ -205,6 +217,7 @@ class EPUBScraper:
         
         # Extract text from spine items (correct order)
         page_counter = 0
+        total_spine_items = max(1, len(spine_items))  # Guard against division by zero
         for idx, item in enumerate(spine_items):
             self.log(f"Spine item {idx} type: {item.get_type()}, name: {item.get_name()}")
             
@@ -213,7 +226,7 @@ class EPUBScraper:
                 break
                 
             # Calculate and report progress
-            progress = (idx / len(spine_items)) * 100
+            progress = ((idx + 1) / total_spine_items) * 100
             if self.progress_callback:
                 try:
                     self.progress_callback(progress)
@@ -354,8 +367,8 @@ class EPUBScraper:
         self.results['statistics'] = {
             'total_pages': total_pages,
             'total_text_length': total_text_length,
-            'pages_with_ocr_text': pages_with_ocr,
-            'total_ocr_characters': total_ocr_chars,
+            'pages_with_ocr': pages_with_ocr,
+            'total_ocr_chars': total_ocr_chars
         }
     
     def save_results(self):
@@ -364,9 +377,10 @@ class EPUBScraper:
             # Save text content
             text_output_path = os.path.join(self.output_dir, "content.txt")
             with open(text_output_path, "w", encoding="utf-8") as f:
-                for page_num in sorted(self.results['pages'].keys()):
-                    page = self.results['pages'][page_num]
-                    f.write(f"=== Page {page_num} ===\n")
+                # Sort pages by numeric order (extract integer from page key like "page_123")
+                for page_key in sorted(self.results['pages'].keys(), key=lambda k: int(k.split('_')[1])):
+                    page = self.results['pages'][page_key]
+                    f.write(f"=== Page {page_key} ===\n")
                     f.write(page.get('content', '') + "\n\n")
             
             # Save metadata

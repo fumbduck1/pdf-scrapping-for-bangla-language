@@ -103,7 +103,7 @@ class TestScraperIntegration(unittest.TestCase):
     def test_job_config(self):
         """Test PDF job configuration"""
         config = JobConfig(
-            pdf_path="test.pdf",
+            input_path="test.pdf",
             output_root="output",
             use_ocr=True,
             ocr=OCRConfig(
@@ -119,7 +119,7 @@ class TestScraperIntegration(unittest.TestCase):
         )
         
         self.assertIsInstance(config, JobConfig)
-        self.assertEqual(config.pdf_path, "test.pdf")
+        self.assertEqual(config.input_path, "test.pdf")
         self.assertEqual(config.output_root, "output")
         self.assertTrue(config.use_ocr)
         self.assertEqual(config.ocr.ocr_method, "easyocr")
@@ -129,7 +129,7 @@ class TestScraperIntegration(unittest.TestCase):
     def test_pdfscraper_from_job_config_output_dir(self):
         """Ensure from_job_config wires fields and derives output_dir consistently."""
         cfg = JobConfig(
-            pdf_path="/tmp/sample.pdf",
+            input_path="/tmp/sample.pdf",
             output_root="/out",
             use_ocr=True,
             ocr=OCRConfig(ocr_method="easyocr", ocr_lang="ben", quality_mode=True),

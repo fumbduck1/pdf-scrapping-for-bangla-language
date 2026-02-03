@@ -831,8 +831,8 @@ class PDFScraper:
     def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
         """Construct a PDFScraper directly from a JobConfig to reduce call-site wiring."""
         return cls(
-            pdf_path=job_config.pdf_path,
-            output_dir=os.path.join(job_config.output_root, Path(job_config.pdf_path).stem),
+            pdf_path=job_config.input_path,
+            output_dir=os.path.join(job_config.output_root, Path(job_config.input_path).stem),
             use_ocr=job_config.use_ocr,
             ocr_method=job_config.ocr.ocr_method,
             ocr_lang=job_config.ocr.ocr_lang,
@@ -1162,17 +1162,12 @@ class PDFScraper:
                         break
 
                     # Calculate and report progress
-                    progress = (page_num / total_pages) * 100
+                    progress = ((page_num + 1) / total_pages) * 100
                     if self.progress_callback:
-                        # Check if the callback accepts progress (numeric) or just log messages
-                        # First try to call with progress value directly
                         try:
                             self.progress_callback(progress)
-                        except Exception:
-                            # If that fails, treat as log callback
-                            pass
-                    
-                    self.log(f"Processing {page_num + 1}/{total_pages}")
+                        except (TypeError, ValueError) as e:
+                            self.log(f"Error in progress callback: {str(e)}")
                     page_text = ""
                     page_level_ocr = None
                     render_path = None
@@ -1415,7 +1410,7 @@ def run_pdf_job(job_config: JobConfig, stop_event, log_cb):
         for w in warnings:
             log_cb(f"Warning: {w}")
 
-    pdf_name = Path(job_config.pdf_path).stem
+    pdf_name = Path(job_config.input_path).stem
     pdf_output = os.path.join(job_config.output_root, pdf_name)
     scraper = None
     try:
@@ -1441,10 +1436,10 @@ def run_pdf_job(job_config: JobConfig, stop_event, log_cb):
         if log_cb:
             log_cb(f"Error: {e}")
         if scraper:
-            scraper.log_error(f"Batch error on {job_config.pdf_path}: {e}")
+            scraper.log_error(f"Batch error on {job_config.input_path}: {e}")
         else:
             os.makedirs(pdf_output, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(os.path.join(pdf_output, "errors.log"), "a", encoding="utf-8") as f:
-                f.write(f"[{ts}] Batch error on {job_config.pdf_path}: {e}\n")
+                f.write(f"[{ts}] Batch error on {job_config.input_path}: {e}\n")
         return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": pdf_output}

@@ -139,18 +139,18 @@ def test_config_validation():
     config.pdf_path = ""
     config.output_root = "output"
     errors = config_manager.validate_config(config)
-    assert "PDF path must be provided" in errors
+    assert "Input path must be provided" in errors
     
     # Test config without output root
     config = config_manager.get_default_config()
-    config.pdf_path = "test.pdf"
+    config.input_path = "test.pdf"
     config.output_root = ""
     errors = config_manager.validate_config(config)
     assert "Output directory must be provided" in errors
     
     # Test with invalid OCR method
     config = config_manager.get_default_config()
-    config.pdf_path = "test.pdf"
+    config.input_path = "test.pdf"
     config.output_root = "output"
     config.ocr.ocr_method = "invalid"
     errors = config_manager.validate_config(config)
