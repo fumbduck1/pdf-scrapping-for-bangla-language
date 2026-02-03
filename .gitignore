@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+tests\__pycache__
 # Project outputs and logs
 output/
 performance_output/
