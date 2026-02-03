@@ -13,11 +13,23 @@ def run_stress_test(renderer, num_threads, iterations):
     """Run high-concurrency stress test on the same page to maximize cache contention."""
     results = []
     
+    # Mock subprocess.run to return valid PPM data
+    def mock_subprocess_run(*args, **kwargs):
+        from unittest.mock import Mock
+        result = Mock()
+        result.returncode = 0
+        # Create a minimal valid PPM file header
+        ppm_header = b"P6\n100 100\n255\n"
+        # Create 100x100 RGB pixel data (all black)
+        ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+        result.stdout = ppm_data
+        result.stderr = b""
+        return result
+    
     def worker():
         thread_results = []
-        with mock.patch("scraper._lazy_import_pdf2image", 
-                      return_value=(lambda *args, **kwargs: [Image.new("RGB", (10, 10))], 
-                                    lambda *args, **kwargs: [Image.new("RGB", (10, 10))])):
+        with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+             mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             for _ in range(iterations):
                 start_time = time.time()
                 result = renderer.render_page(0, 1.0)
@@ -85,10 +97,29 @@ class TestRenderCacheDuplicates(unittest.TestCase):
         renderer._pdf_bytes = b"%PDF-1.4"
         
         # Run workers accessing different pages to force cache evictions
+        # Mock subprocess.run to return valid PPM data - only for pdftoppm calls
+        import subprocess
+        original_subprocess_run = subprocess.run
+        
+        def mock_subprocess_run(*args, **kwargs):
+            # Only mock pdftoppm calls
+            if "pdftoppm" not in str(args[0]).lower():
+                return original_subprocess_run(*args, **kwargs)
+                
+            from unittest.mock import Mock
+            result = Mock()
+            result.returncode = 0
+            # Create a minimal valid PPM file header
+            ppm_header = b"P6\n100 100\n255\n"
+            # Create 100x100 RGB pixel data (all black)
+            ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+            result.stdout = ppm_data
+            result.stderr = b""
+            return result
+            
         def worker(page_num):
-            with mock.patch("scraper._lazy_import_pdf2image", 
-                          return_value=(lambda *args, **kwargs: [Image.new("RGB", (10, 10))], 
-                                        lambda *args, **kwargs: [Image.new("RGB", (10, 10))])):
+            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                 mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for _ in range(20):
                     renderer.render_page(page_num, 1.0)
         

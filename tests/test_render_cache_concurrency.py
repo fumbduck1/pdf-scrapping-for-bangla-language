@@ -45,9 +45,30 @@ class TestRenderCacheConcurrency(unittest.TestCase):
         num_pages = 5
         
         # Function to render multiple pages in a thread
+        # Mock subprocess.run to return valid PPM data - only for pdftoppm calls
+        import subprocess
+        original_subprocess_run = subprocess.run
+        
+        def mock_subprocess_run(*args, **kwargs):
+            # Only mock pdftoppm calls
+            if "pdftoppm" not in str(args[0]).lower():
+                return original_subprocess_run(*args, **kwargs)
+                
+            from unittest.mock import Mock
+            result = Mock()
+            result.returncode = 0
+            # Create a minimal valid PPM file header
+            ppm_header = b"P6\n100 100\n255\n"
+            # Create 100x100 RGB pixel data (all black)
+            ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+            result.stdout = ppm_data
+            result.stderr = b""
+            time.sleep(0.001)  # Add a small delay to simulate rendering time
+            return result
+            
         def worker():
-            with mock.patch("scraper._lazy_import_pdf2image", 
-                          return_value=(fake_from_path, fake_from_bytes)):
+            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                 mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for page_num in range(num_pages):
                     renderer.render_page(page_num, 1.0)
         

@@ -158,15 +158,27 @@ class TestRendererCache(unittest.TestCase):
 
         dummy_img = Image.new("RGB", (10, 10))
 
-        def fake_from_bytes(*args, **kwargs):
-            return [dummy_img]
+        # Mock check_pdftoppm_available to return True
+        # Mock subprocess.run to return dummy image data
+        def mock_check_pdftoppm_available(*args, **kwargs):
+            return True
+            
+        def mock_subprocess_run(*args, **kwargs):
+            from unittest.mock import Mock
+            result = Mock()
+            result.returncode = 0
+            # Create a minimal valid PPM file header
+            ppm_header = b"P6\n100 100\n255\n"
+            # Create 100x100 RGB pixel data (all black)
+            ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+            result.stdout = ppm_data
+            result.stderr = b""
+            return result
 
-        def fake_from_path(*args, **kwargs):
-            return [dummy_img]
+        renderer._pdf_bytes = b"%PDF-1.4"  # force in-memory PDF path
 
-        renderer._pdf_bytes = b"%PDF-1.4"  # force convert_from_bytes path
-
-        with mock.patch("scraper._lazy_import_pdf2image", return_value=(fake_from_path, fake_from_bytes)):
+        with mock.patch("scraper.check_pdftoppm_available", side_effect=mock_check_pdftoppm_available), \
+             mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             renderer.render_page(0, 1.0)
             renderer.render_page(1, 1.0)
             renderer.render_page(2, 1.0)

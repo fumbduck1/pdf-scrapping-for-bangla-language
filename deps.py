@@ -82,27 +82,43 @@ def log_torch_env():
     print("device:", device.get("device"))
     print("reason:", device.get("reason"))
     
-convert_from_path = None
-convert_from_bytes = None
-PDF2IMAGE_AVAILABLE = False
 PdfReader = None
 PYPDF_AVAILABLE = False
 
+# Compatibility alias for existing code/test compatibility
+PDF2IMAGE_AVAILABLE = False
+
+# Poppler commands availability
+PDFTOPPM_AVAILABLE = False
+
 
 def _lazy_import_pdf2image():
-    global convert_from_path, convert_from_bytes, PDF2IMAGE_AVAILABLE
-    if convert_from_path and convert_from_bytes:
-        PDF2IMAGE_AVAILABLE = True
-        return convert_from_path, convert_from_bytes
-    try:
-        from pdf2image import convert_from_path as _cfp, convert_from_bytes as _cfb
-        convert_from_path, convert_from_bytes = _cfp, _cfb
-        PDF2IMAGE_AVAILABLE = True
-    except ImportError:
-        convert_from_path = None
-        convert_from_bytes = None
-        PDF2IMAGE_AVAILABLE = False
-    return convert_from_path, convert_from_bytes
+    """Compatibility function for existing code - returns None values."""
+    return None, None
+
+
+def check_pdftoppm_available(poppler_path: str = None) -> bool:
+    """Check if pdftoppm command is available."""
+    global PDFTOPPM_AVAILABLE
+    
+    import shutil
+    
+    if PDFTOPPM_AVAILABLE:
+        return True
+        
+    # Try to find pdftoppm in poppler path or system PATH
+    if poppler_path:
+        pdftoppm_path = Path(poppler_path) / ("pdftoppm.exe" if sys.platform.startswith("win") else "pdftoppm")
+        if pdftoppm_path.exists() and pdftoppm_path.is_file():
+            PDFTOPPM_AVAILABLE = True
+            return True
+            
+    # Check system PATH
+    if shutil.which("pdftoppm"):
+        PDFTOPPM_AVAILABLE = True
+        return True
+        
+    return False
 
 
 def _lazy_import_pypdf():
@@ -241,11 +257,10 @@ def detect_poppler_path():
     return None
 
 __all__ = [
-    "convert_from_path",
-    "convert_from_bytes",
     "PdfReader",
-    "PDF2IMAGE_AVAILABLE",
     "PYPDF_AVAILABLE",
+    "PDFTOPPM_AVAILABLE",
+    "check_pdftoppm_available",
     "np",
     "easyocr",
     "EASYOCR_AVAILABLE",

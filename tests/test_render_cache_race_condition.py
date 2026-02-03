@@ -110,10 +110,45 @@ class TestRenderCacheRaceCondition(unittest.TestCase):
             
             renderer._render_cache = TrackedRenderCache(renderer._render_cache)
             
+            # Save original subprocess.run for other commands
+            import subprocess
+            original_subprocess_run = subprocess.run
+            
             # Define worker that renders the same page repeatedly
+            # Mock subprocess.run to return valid PPM data with delay
+            def mock_subprocess_run(*args, **kwargs):
+                # Only mock pdftoppm calls
+                if "pdftoppm" not in str(args[0]).lower():
+                    return original_subprocess_run(*args, **kwargs)
+                    
+                nonlocal rendering_in_progress, render_invocations
+                
+                # Count actual render invocations
+                with render_lock:
+                    render_invocations += 1
+                    rendering_in_progress = True
+                
+                # Introduce a delay to maximize chance of race
+                time.sleep(0.1)
+                
+                # Mark that rendering is complete
+                with render_lock:
+                    rendering_in_progress = False
+                
+                from unittest.mock import Mock
+                result = Mock()
+                result.returncode = 0
+                # Create a minimal valid PPM file header
+                ppm_header = b"P6\n100 100\n255\n"
+                # Create 100x100 RGB pixel data (all black)
+                ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+                result.stdout = ppm_data
+                result.stderr = b""
+                return result
+                
             def worker():
-                with mock.patch("scraper._lazy_import_pdf2image", 
-                              return_value=(slow_convert_from_path, slow_convert_from_bytes)):
+                with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                     mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                     renderer.render_page(0, 1.0)
             
             # Start multiple workers that will all try to render the same page

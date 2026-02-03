@@ -45,14 +45,17 @@ import preprocess as preproc
 import ocr_easyocr as ocr_e
 import ocr_tesseract as ocr_t
 from deps import (
-    _lazy_import_pdf2image,
     _lazy_import_pypdf,
     EASYOCR_AVAILABLE,
     pytesseract,
     TESSERACT_AVAILABLE,
     detect_poppler_path,
     detect_torch_device,
+    check_pdftoppm_available,
 )
+
+# Compatibility layer for existing tests that mock this
+_lazy_import_pdf2image = None
 from utils import (
     _sanitize_tessdata_prefix,
     _split_langs,
@@ -150,40 +153,73 @@ class PdfRenderer:
                 PENDING = object()
                 self._render_cache[cache_key] = PENDING
                 
-        convert_from_path, convert_from_bytes = _lazy_import_pdf2image()
-        if not convert_from_path or not convert_from_bytes:
-            # Cleanup the placeholder if we failed to import
+        # Check if pdftoppm is available
+        import shutil
+        from deps import check_pdftoppm_available
+        
+        if not check_pdftoppm_available(self.poppler_path):
+            # Cleanup the placeholder if we failed to find pdftoppm
             if self._render_cache is not None:
                 with self._render_cache_lock:
                     if self._render_cache.get(cache_key) is PENDING:
                         del self._render_cache[cache_key]
-            self._log_missing("pdf2image not installed. Install with: pip install pdf2image", err_key="pdf2image")
+            self._log_missing("pdftoppm (Poppler) not found. Install Poppler or set POPPLER_PATH", err_key="poppler")
             return None
+            
         dpi = int((zoom or DEFAULT_ZOOM) * 72)
         dpi = max(dpi, 72)
         try:
-            if self._pdf_bytes:
-                images = convert_from_bytes(
-                    self._pdf_bytes,
-                    dpi=dpi,
-                    first_page=page_num + 1,
-                    last_page=page_num + 1,
-                    fmt=fmt,
-                    poppler_path=self.poppler_path or None,
-                )
+            import subprocess
+            import tempfile
+            
+            # Find pdftoppm executable
+            if self.poppler_path:
+                pdftoppm_cmd = str(Path(self.poppler_path) / ("pdftoppm.exe" if sys.platform.startswith("win") else "pdftoppm"))
             else:
-                images = convert_from_path(
-                    self.pdf_path,
-                    dpi=dpi,
-                    first_page=page_num + 1,
-                    last_page=page_num + 1,
-                    fmt=fmt,
-                    poppler_path=self.poppler_path or None,
-                )
-            if not images:
-                raise RuntimeError("No image returned from pdf2image")
-
-            render_img = images[0]
+                pdftoppm_cmd = shutil.which("pdftoppm")
+                
+            # Command arguments
+            args = [
+                pdftoppm_cmd,
+                "-f", str(page_num + 1),
+                "-l", str(page_num + 1),
+                "-r", str(dpi),
+                "-png"  # Always use PNG for best quality
+            ]
+            
+            # Handle case where PDF is in memory
+            input_path = None
+            temp_file = None
+            if self._pdf_bytes:
+                # Write PDF bytes to temporary file
+                temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                temp_file.write(self._pdf_bytes)
+                temp_file.close()
+                input_path = temp_file.name
+            else:
+                input_path = self.pdf_path
+                
+            # Execute pdftoppm
+            result = subprocess.run(
+                args + [input_path],
+                capture_output=True,
+                text=False
+            )
+            
+            # Cleanup temporary file if created
+            if temp_file:
+                try:
+                    os.unlink(temp_file.name)
+                except Exception:
+                    pass
+                    
+            if result.returncode != 0:
+                raise RuntimeError(f"pdftoppm failed: {result.stderr.decode('utf-8', 'ignore')}")
+                
+            # Convert ppm output to PIL Image
+            from io import BytesIO
+            render_img = Image.open(BytesIO(result.stdout))
+            
             render_path = None
             if self.persist_renders:
                 render_filename = f"page_{page_num:03d}_render.{fmt}"

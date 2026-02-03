@@ -7,7 +7,6 @@ from typing import List, Tuple
 ZERO_WIDTH_CHARS = ['\u200b', '\u200c', '\u200d', '\ufeff']
 
 from deps import (
-    _lazy_import_pdf2image,
     _lazy_import_pypdf,
     _lazy_import_easyocr,
     log_torch_env,
@@ -15,6 +14,7 @@ from deps import (
     TESSERACT_AVAILABLE,
     pytesseract,
     detect_poppler_path,
+    check_pdftoppm_available,
 )
 
 
@@ -151,13 +151,10 @@ def validate_runtime_env():
 
     if not _lazy_import_pypdf():
         errors.append("pypdf is required. Install with: pip install pypdf")
-    converters = _lazy_import_pdf2image()
-    if not converters or not all(converters):
-        warnings.append("Raster OCR disabled: install pdf2image and Poppler if you need image-based OCR.")
-    else:
-        ok_poppler, poppler_msg = check_poppler_ready()
-        if not ok_poppler:
-            warnings.append(poppler_msg)
+        
+    poppler_path = detect_poppler_path()
+    if not check_pdftoppm_available(poppler_path):
+        warnings.append("Raster OCR disabled: Poppler (pdftoppm) not found. Install Poppler or set POPPLER_PATH.")
 
     ok, msg = check_tesseract_ready()
     if not ok:
@@ -200,11 +197,9 @@ def summarize_env():
     elif not any("pypdf" in e for e in errors):
         errors.append("pypdf missing (pip install pypdf)")
 
-    converters = _lazy_import_pdf2image()
-    if converters and all(converters):
-        info.append("pdf2image: ok")
-    elif not any("pdf2image" in w for w in warnings):
-        warnings.append("pdf2image missing; raster OCR disabled until installed")
+    poppler_path = detect_poppler_path()
+    if check_pdftoppm_available(poppler_path):
+        info.append("poppler: ok (pdftoppm available)")
 
     easyocr_mod = _lazy_import_easyocr()
     if easyocr_mod:

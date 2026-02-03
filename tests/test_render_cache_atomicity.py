@@ -15,11 +15,30 @@ def run_concurrent_renders(renderer, num_threads, num_pages, delay=0.01):
     """Run concurrent render operations on the same pages to test cache behavior."""
     results = []
     
+    # Mock subprocess.run to return valid PPM data - only for pdftoppm calls
+    import subprocess
+    original_subprocess_run = subprocess.run
+    
+    def mock_subprocess_run(*args, **kwargs):
+        # Only mock pdftoppm calls
+        if "pdftoppm" not in str(args[0]).lower():
+            return original_subprocess_run(*args, **kwargs)
+            
+        from unittest.mock import Mock
+        result = Mock()
+        result.returncode = 0
+        # Create a minimal valid PPM file header
+        ppm_header = b"P6\n100 100\n255\n"
+        # Create 100x100 RGB pixel data (all black)
+        ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+        result.stdout = ppm_data
+        result.stderr = b""
+        return result
+    
     def worker():
         thread_results = []
-        with mock.patch("scraper._lazy_import_pdf2image", 
-                      return_value=(lambda *args, **kwargs: [Image.new("RGB", (10, 10))], 
-                                    lambda *args, **kwargs: [Image.new("RGB", (10, 10))])):
+        with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+             mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             for page_num in range(num_pages):
                 start_time = time.time()
                 result = renderer.render_page(page_num, 1.0)
@@ -114,9 +133,21 @@ class TestRenderCacheAtomicity(unittest.TestCase):
             renderer._pdf_bytes = b"%PDF-1.4"
             
             # First, warm up the cache with distinct pages
-            with mock.patch("scraper._lazy_import_pdf2image", 
-                          return_value=(lambda *args, **kwargs: [Image.new("RGB", (10, 10))], 
-                                        lambda *args, **kwargs: [Image.new("RGB", (10, 10))])):
+            # Mock subprocess.run to return valid PPM data
+            def mock_subprocess_run(*args, **kwargs):
+                from unittest.mock import Mock
+                result = Mock()
+                result.returncode = 0
+                # Create a minimal valid PPM file header
+                ppm_header = b"P6\n100 100\n255\n"
+                # Create 100x100 RGB pixel data (all black)
+                ppm_data = ppm_header + b"\x00\x00\x00" * 100 * 100
+                result.stdout = ppm_data
+                result.stderr = b""
+                return result
+                
+            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                 mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for page_num in range(max_cache_size):
                     renderer.render_page(page_num, 1.0)
             
@@ -127,7 +158,9 @@ class TestRenderCacheAtomicity(unittest.TestCase):
             
             # Now render newer pages in single thread
             for page_num in range(max_cache_size, max_cache_size + 2):
-                renderer.render_page(page_num, 1.0)
+                with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                     mock.patch("subprocess.run", side_effect=mock_subprocess_run):
+                    renderer.render_page(page_num, 1.0)
             
             # Verify oldest keys are evicted
             new_keys = list(renderer._render_cache.keys())
