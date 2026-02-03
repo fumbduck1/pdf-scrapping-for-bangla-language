@@ -1161,6 +1161,17 @@ class PDFScraper:
                         self.log("Stop requested; aborting remaining pages")
                         break
 
+                    # Calculate and report progress
+                    progress = (page_num / total_pages) * 100
+                    if self.progress_callback:
+                        # Check if the callback accepts progress (numeric) or just log messages
+                        # First try to call with progress value directly
+                        try:
+                            self.progress_callback(progress)
+                        except Exception:
+                            # If that fails, treat as log callback
+                            pass
+                    
                     self.log(f"Processing {page_num + 1}/{total_pages}")
                     page_text = ""
                     page_level_ocr = None

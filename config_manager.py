@@ -82,6 +82,16 @@ class JobConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     text_layer: TextLayerConfig = field(default_factory=TextLayerConfig)
     max_workers: Optional[int] = None
+    
+    @property
+    def file_type(self):
+        """Determine file type from extension."""
+        ext = Path(self.pdf_path).suffix.lower()
+        if ext == '.pdf':
+            return 'pdf'
+        elif ext == '.epub':
+            return 'epub'
+        return 'unknown'
 
 
 class ConfigManager:

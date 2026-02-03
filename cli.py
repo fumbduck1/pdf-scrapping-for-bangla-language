@@ -7,8 +7,8 @@ from scraper import run_pdf_job
 from utils import validate_runtime_env, print_env_report
 
 def main():
-    parser = argparse.ArgumentParser(description="PDF OCR scraper (EasyOCR + Tesseract)")
-    parser.add_argument("pdf", nargs="*", help="PDF file(s) to process")
+    parser = argparse.ArgumentParser(description="PDF/EPUB OCR scraper (EasyOCR + Tesseract)")
+    parser.add_argument("files", nargs="*", help="PDF or EPUB file(s) to process")
     parser.add_argument("--output", "-o", default="output", help="Output root directory")
     parser.add_argument("--lang", default="ben", help="OCR language, e.g., ben, eng, ben+eng")
     parser.add_argument("--quality", action="store_true", help="Enable quality mode (slower, cleaner)")
@@ -71,19 +71,29 @@ def main():
         if errors:
             raise SystemExit("\n".join(errors))
         
-        print(f"Processing {Path(config.pdf_path).name} ...")
-        result = run_pdf_job(config, stop_event=None, log_cb=print)
+        # Determine file type and run appropriate scraper
+        file_ext = Path(config.pdf_path).suffix.lower()
+        if file_ext == '.pdf':
+            from scraper import run_pdf_job
+            result = run_pdf_job(config, stop_event=None, log_cb=print)
+        elif file_ext == '.epub':
+            from epub_scraper import run_epub_job
+            result = run_epub_job(config, stop_event=None, log_cb=print)
+        else:
+            print(f"Unsupported file type: {file_ext}")
+            return
+            
         status = "ok" if result.get("save_ok") else "failed"
         print(f"Done: {Path(config.pdf_path).name} [{status}] -> {result.get('output_dir')}")
     else:
-        # Process each PDF file
-        for pdf_path in args.pdf:
-            pdf_path = Path(pdf_path)
-            if not pdf_path.exists():
-                print(f"Skip missing file: {pdf_path}")
+        # Process each file
+        for file_path in args.files:
+            file_path = Path(file_path)
+            if not file_path.exists():
+                print(f"Skip missing file: {file_path}")
                 continue
             job = create_job_config(
-                pdf_path=str(pdf_path),
+                pdf_path=str(file_path),
                 output_root=args.output,
                 use_ocr=True,
                 ocr_method="easyocr",
@@ -94,10 +104,22 @@ def main():
                 persist_renders=args.persist_renders,
                 max_workers=args.max_workers,
             )
-            print(f"Processing {pdf_path.name} ...")
-            result = run_pdf_job(job, stop_event=None, log_cb=print)
+            print(f"Processing {file_path.name} ...")
+            
+            # Determine file type and run appropriate scraper
+            file_ext = file_path.suffix.lower()
+            if file_ext == '.pdf':
+                from scraper import run_pdf_job
+                result = run_pdf_job(job, stop_event=None, log_cb=print)
+            elif file_ext == '.epub':
+                from epub_scraper import run_epub_job
+                result = run_epub_job(job, stop_event=None, log_cb=print)
+            else:
+                print(f"Unsupported file type: {file_ext}")
+                continue
+                
             status = "ok" if result.get("save_ok") else "failed"
-            print(f"Done: {pdf_path.name} [{status}] -> {result.get('output_dir')}")
+            print(f"Done: {file_path.name} [{status}] -> {result.get('output_dir')}")
 
 
 if __name__ == "__main__":

@@ -256,6 +256,28 @@ def detect_poppler_path():
             continue
     return None
 
+# EPUB support
+epub_lib = None
+EPUBLIB_AVAILABLE = False
+
+def _lazy_import_epublib():
+    global epub_lib, EPUBLIB_AVAILABLE
+    if epub_lib is not None:
+        return epub_lib
+    try:
+        from ebooklib import epub
+        epub_lib = epub
+        EPUBLIB_AVAILABLE = True
+    except ImportError as e:
+        print(f"EPUB library import error: {e}")
+        epub_lib = None
+        EPUBLIB_AVAILABLE = False
+    return epub_lib
+
+# Initialize on module import
+_lazy_import_epublib()
+
+
 __all__ = [
     "PdfReader",
     "PYPDF_AVAILABLE",
@@ -269,4 +291,7 @@ __all__ = [
     "log_torch_env",
     "detect_torch_device",
     "detect_poppler_path",
+    "epub_lib",
+    "EPUBLIB_AVAILABLE",
+    "_lazy_import_epublib",
 ]

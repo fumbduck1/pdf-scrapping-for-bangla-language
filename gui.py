@@ -119,8 +119,8 @@ class MinimalGUI:
         self.status_label.pack(fill=tk.X)
 
     def select_pdfs(self):
-        """Select PDF files."""
-        files = filedialog.askopenfilenames(title="Select PDF files", filetypes=[("PDF", "*.pdf")])
+        """Select PDF or EPUB files."""
+        files = filedialog.askopenfilenames(title="Select PDF or EPUB files", filetypes=[("PDF", "*.pdf"), ("EPUB", "*.epub")])
         if files:
             self.pdf_files = list(files)
             self.pdf_label.config(text=f"{len(files)} file(s) selected", foreground="black")
@@ -258,7 +258,7 @@ class MinimalGUI:
         thread.start()
     
     def process_batch(self):
-        """Process PDFs in background."""
+        """Process PDFs or EPUBs in background."""
         quality_choice = self.quality_var.get()
         if self.speed_var.get():
             quality_choice = False
@@ -269,21 +269,21 @@ class MinimalGUI:
             ocr_lang=self.lang_var.get() or 'ben',
             quality_mode=quality_choice,
         )
-        self.log(f"PDFs selected: {len(self.pdf_files)}")
+        self.log(f"Files selected: {len(self.pdf_files)}")
         self.log(f"Output dir: {self.output_dir}")
         self.log(f"Language: {self.lang_var.get()}")
 
         total = len(self.pdf_files)
         if total == 0:
-            self.log("No PDFs to process; aborting.")
+            self.log("No files to process; aborting.")
             return
 
-        for idx, pdf_file in enumerate(self.pdf_files):
+        for idx, file_path in enumerate(self.pdf_files):
             if not self.is_processing or (self.stop_event and self.stop_event.is_set()):
                 break
-            self.log(f"[{idx + 1}/{total}] {Path(pdf_file).name}")
+            self.log(f"[{idx + 1}/{total}] {Path(file_path).name}")
             job_config = create_job_config(
-                pdf_path=pdf_file,
+                pdf_path=file_path,
                 output_root=self.output_dir,
                 use_ocr=settings.use_ocr,
                 ocr_method=settings.ocr_method,
@@ -292,7 +292,33 @@ class MinimalGUI:
                 fast_mode=self.speed_var.get(),
                 persist_renders=self.persist_var.get(),
             )
-            result = run_pdf_job(job_config, self.stop_event, self.log)
+            
+            # Calculate file-level progress range
+            file_start_progress = (idx / total) * 100
+            file_end_progress = ((idx + 1) / total) * 100
+            file_progress_range = file_end_progress - file_start_progress
+            
+            # Create a wrapper callback to scale page-level progress to file-level progress
+            def progress_callback(page_progress):
+                if isinstance(page_progress, (int, float)):
+                    # Scale page-level progress (0-100) to this file's progress range
+                    scaled_progress = file_start_progress + (page_progress / 100) * file_progress_range
+                    self._emit_progress(scaled_progress)
+                elif isinstance(page_progress, str):
+                    # If it's a string, treat as log message
+                    self.log(page_progress)
+            
+            # Determine file type and run appropriate scraper
+            file_ext = Path(file_path).suffix.lower()
+            if file_ext == '.pdf':
+                from scraper import run_pdf_job
+                result = run_pdf_job(job_config, self.stop_event, progress_callback)
+            elif file_ext == '.epub':
+                from epub_scraper import run_epub_job
+                result = run_epub_job(job_config, self.stop_event, progress_callback)
+            else:
+                self.log(f"Unsupported file type: {file_ext}")
+                continue
 
             if result.get("save_ok"):
                 stats = result.get("stats", {})
@@ -305,7 +331,8 @@ class MinimalGUI:
             else:
                 self.log("Save failed")
 
-            self._emit_progress((idx + 1) / total * 100)
+            # Ensure we reach 100% for this file before moving to next
+            self._emit_progress(file_end_progress)
 
         self._emit_done(completed=not (self.stop_event and self.stop_event.is_set()))
 
