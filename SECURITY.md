@@ -8,8 +8,6 @@ Security fixes are applied to the latest main branch. Older snapshots or forks a
 
 1. **Do not file public issues.**  
 2. Use the **“Report a vulnerability”** link in the repository’s **Security** tab to create a private GitHub Security Advisory.  
-3. If that is not available, email the maintainers at: `security@fumbduck1.com` with a clear description, reproduction steps, impact, and any suggested mitigations.
-
 ## Expectations
 
 - You will receive an acknowledgment within **3 business days**.  
