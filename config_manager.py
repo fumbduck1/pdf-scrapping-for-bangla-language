@@ -84,7 +84,7 @@ class JobConfig:
     max_workers: Optional[int] = None
     
     @property
-    def file_type(self):
+    def file_type(self) -> str:
         """Determine file type from extension."""
         ext = Path(self.pdf_path).suffix.lower()
         if ext == '.pdf':
@@ -271,8 +271,8 @@ class ConfigManager:
             pdf_path = Path(config.pdf_path)
             if not pdf_path.exists():
                 errors.append(f"PDF file not found: {config.pdf_path}")
-            if pdf_path.suffix.lower() != ".pdf":
-                errors.append(f"File must be a PDF: {config.pdf_path}")
+            if pdf_path.suffix.lower() not in (".pdf", ".epub"):
+                errors.append(f"File must be a PDF or EPUB: {config.pdf_path}")
         
         if not config.output_root:
             errors.append("Output directory must be provided")
