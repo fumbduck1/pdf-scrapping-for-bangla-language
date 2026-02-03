@@ -16,15 +16,43 @@ This project is a comprehensive PDF scraping tool that uses OCR (Optical Charact
 
 ## Installation
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Quick Installation (Recommended)
 
-2. Optional: Install Tesseract OCR (required for Tesseract engine)
-   - Windows: Download from https://github.com/tesseract-ocr/tesseract
-   - Linux: `sudo apt-get install tesseract-ocr`
-   - macOS: `brew install tesseract`
+Run the lightweight installer that automatically installs all dependencies and configures the environment:
+
+```bash
+python installer.py
+```
+
+The installer will:
+- Check and install Python dependencies
+- Install system dependencies (Tesseract OCR, Poppler tools)
+- Detect NVIDIA CUDA and prompt installation if needed
+- Validate the environment
+- Run a smoke test
+
+### Manual Installation
+
+If you prefer manual installation:
+
+1. Install Python dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2. Install Tesseract OCR (required for Tesseract engine)
+    - Windows: Download from https://github.com/tesseract-ocr/tesseract
+    - Linux: `sudo apt-get install tesseract-ocr`
+    - macOS: `brew install tesseract`
+
+3. Install Poppler tools (required for PDF rendering)
+    - Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases
+    - Linux: `sudo apt-get install poppler-utils`
+    - macOS: `brew install poppler`
+
+4. Optional: Install NVIDIA CUDA (for GPU acceleration)
+    - Download from: https://developer.nvidia.com/cuda-toolkit
+    - Recommended version: CUDA 11.8 or 12.x
 
 ## Usage
 
