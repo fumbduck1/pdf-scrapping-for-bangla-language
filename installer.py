@@ -5,7 +5,6 @@ Installs all necessary dependencies and configures the environment.
 Runs completely on the device and prompts for NVIDIA CUDA installation if not detected.
 """
 
-import os
 import sys
 import subprocess
 import platform
@@ -34,25 +33,43 @@ def print_warning(msg: str):
     print(f"\033[1;33m⚠\033[0m {msg}")
 
 
-def run_command(cmd: str, check: bool = True, capture_output: bool = False) -> Optional[subprocess.CompletedProcess]:
+import shlex
+from typing import Union, Sequence
+
+def run_command(cmd: Union[str, Sequence[str]], check: bool = True, capture_output: bool = False) -> Optional[subprocess.CompletedProcess]:
     """Run a command with optional error checking and output capture."""
     try:
+        # Convert string command to list using shlex.split for safe parsing
+        if isinstance(cmd, str):
+            cmd_list = shlex.split(cmd)
+        else:
+            cmd_list = list(cmd)
+            
         if capture_output:
             result = subprocess.run(
-                cmd,
-                shell=True,
+                cmd_list,
+                shell=False,
                 check=check,
                 capture_output=True,
                 text=True,
                 encoding='utf-8'
             )
-            return result
         else:
-            subprocess.run(cmd, shell=True, check=check)
-        return None
+            result = subprocess.run(cmd_list, shell=False, check=check)
+        return result
     except subprocess.CalledProcessError as e:
         print_error(f"Command failed: {cmd}")
-        print_error(f"Error: {e.stderr}")
+        # Check available error information
+        error_msg = None
+        if e.stderr:
+            error_msg = e.stderr.strip()
+        elif e.output:
+            error_msg = e.output.strip()
+        elif e.stdout:
+            error_msg = e.stdout.strip()
+        else:
+            error_msg = str(e)
+        print_error(f"Error: {error_msg}")
         return None
     except Exception as e:
         print_error(f"Command failed: {cmd}")
@@ -78,11 +95,13 @@ def install_python_deps():
         print_error("requirements.txt not found")
         sys.exit(1)
     
-    cmd = f"{sys.executable} -m pip install -r requirements.txt"
-    result = run_command(cmd, check=False)
+    cmd = [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"]
+    result = run_command(cmd, check=False, capture_output=True)
     
-    if result and result.returncode != 0:
+    if not result or result.returncode != 0:
         print_error("Failed to install Python dependencies")
+        if result and result.stderr:
+            print_error(f"Error output: {result.stderr}")
         sys.exit(1)
     
     print_success("Python dependencies installed successfully")
@@ -106,26 +125,33 @@ def install_tesseract():
         input("Press Enter after installation is complete...")
     
     elif system == "Darwin":  # macOS
-        cmd = "brew install tesseract"
-        result = run_command(cmd)
-        if result is None:
+        cmd = ["brew", "install", "tesseract"]
+        result = run_command(cmd, capture_output=True, check=False)
+        if not result or result.returncode != 0:
             print_error("Failed to install Tesseract OCR")
+            if result and result.stderr:
+                print_error(f"Error output: {result.stderr}")
             return False
     
     else:  # Linux
         if shutil.which("apt-get"):
-            cmd = "sudo apt-get update && sudo apt-get install -y tesseract-ocr"
+            # For apt-get, we need to run update first then install
+            result1 = run_command(["sudo", "apt-get", "update"], capture_output=True, check=False)
+            if result1 and result1.returncode == 0:
+                result = run_command(["sudo", "apt-get", "install", "-y", "tesseract-ocr"], capture_output=True, check=False)
+            else:
+                result = result1
         elif shutil.which("yum"):
-            cmd = "sudo yum install -y tesseract"
+            result = run_command(["sudo", "yum", "install", "-y", "tesseract"], capture_output=True, check=False)
         elif shutil.which("dnf"):
-            cmd = "sudo dnf install -y tesseract"
+            result = run_command(["sudo", "dnf", "install", "-y", "tesseract"], capture_output=True, check=False)
         else:
             print_error("Unsupported package manager. Please install tesseract manually.")
             return False
-        
-        result = run_command(cmd)
-        if result is None:
+        if not result or result.returncode != 0:
             print_error("Failed to install Tesseract OCR")
+            if result and result.stderr:
+                print_error(f"Error output: {result.stderr}")
             return False
     
     if is_tesseract_installed():
@@ -154,26 +180,33 @@ def install_poppler():
         input("Press Enter after installation is complete...")
     
     elif system == "Darwin":  # macOS
-        cmd = "brew install poppler"
-        result = run_command(cmd)
-        if result is None:
+        cmd = ["brew", "install", "poppler"]
+        result = run_command(cmd, capture_output=True, check=False)
+        if not result or result.returncode != 0:
             print_error("Failed to install Poppler tools")
+            if result and result.stderr:
+                print_error(f"Error output: {result.stderr}")
             return False
     
     else:  # Linux
         if shutil.which("apt-get"):
-            cmd = "sudo apt-get update && sudo apt-get install -y poppler-utils"
+            # For apt-get, we need to run update first then install
+            result1 = run_command(["sudo", "apt-get", "update"], capture_output=True, check=False)
+            if result1 and result1.returncode == 0:
+                result = run_command(["sudo", "apt-get", "install", "-y", "poppler-utils"], capture_output=True, check=False)
+            else:
+                result = result1
         elif shutil.which("yum"):
-            cmd = "sudo yum install -y poppler-utils"
+            result = run_command(["sudo", "yum", "install", "-y", "poppler-utils"], capture_output=True, check=False)
         elif shutil.which("dnf"):
-            cmd = "sudo dnf install -y poppler-utils"
+            result = run_command(["sudo", "dnf", "install", "-y", "poppler-utils"], capture_output=True, check=False)
         else:
             print_error("Unsupported package manager. Please install poppler-utils manually.")
             return False
-        
-        result = run_command(cmd)
-        if result is None:
+        if not result or result.returncode != 0:
             print_error("Failed to install Poppler tools")
+            if result and result.stderr:
+                print_error(f"Error output: {result.stderr}")
             return False
     
     if is_poppler_installed():
@@ -194,7 +227,7 @@ def is_cuda_available() -> bool:
         # Check if CUDA is installed via registry or command
         try:
             # Check NVIDIA-smi
-            result = run_command("nvidia-smi", check=False, capture_output=True)
+            result = run_command(["nvidia-smi"], check=False, capture_output=True)
             if result and result.returncode == 0:
                 return True
             
@@ -222,7 +255,7 @@ def is_cuda_available() -> bool:
     else:  # Linux
         try:
             # Check NVIDIA-smi
-            result = run_command("nvidia-smi", check=False, capture_output=True)
+            result = run_command(["nvidia-smi"], check=False, capture_output=True)
             if result and result.returncode == 0:
                 return True
                 
@@ -256,7 +289,7 @@ def prompt_cuda_installation():
             import wmi
         except ImportError:
             print_step("Installing wmi library for GPU detection...")
-            run_command(f"{sys.executable} -m pip install wmi", check=False)
+            run_command([sys.executable, "-m", "pip", "install", "wmi"], check=False)
             try:
                 import wmi
             except ImportError:
@@ -274,8 +307,10 @@ def prompt_cuda_installation():
     
     elif system == "Linux":
         try:
-            result = run_command("lspci | grep -i nvidia", check=False, capture_output=True)
-            if result and result.returncode == 0 and "NVIDIA" in result.stdout:
+            # For pipeline commands, we need to handle them separately
+            # First run lspci, then grep the output
+            result_lspci = run_command(["lspci"], check=False, capture_output=True)
+            if result_lspci and result_lspci.returncode == 0 and "NVIDIA" in result_lspci.stdout:
                 has_nvidia_gpu = True
         except Exception as e:
             print_warning(f"GPU detection error: {e}")
