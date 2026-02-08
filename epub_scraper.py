@@ -117,6 +117,29 @@ class EPUBScraper:
         }
         os.makedirs(self.output_dir, exist_ok=True)
         self.logger = get_logger()
+        
+        # Initialize OCR pipeline
+        from scraper import OcrPipeline
+        from constants import (
+            FAST_CONFIDENCE_SKIP,
+            HEADER_FOOTER_CROP_PCT,
+            WATERMARK_FLATTEN,
+            WATERMARK_CLIP_THRESHOLD
+        )
+        
+        self.ocr_pipeline = OcrPipeline(
+            ocr_method=self.ocr_method,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            fast_mode=self.fast_mode,
+            fast_conf_skip=FAST_CONFIDENCE_SKIP,
+            tessdata_dir=self.tessdata_dir,
+            log=self.log,
+            log_error=self.log_error,
+            header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
+            watermark_flatten=WATERMARK_FLATTEN,
+            watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD
+        )
     
     @classmethod
     def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
@@ -345,12 +368,35 @@ class EPUBScraper:
                 try:
                     self.log(f"Found image: {item.get_name()}")
                     
+                    # Process image with OCR if OCR is enabled
+                    ocr_text = "[Image]"
+                    ocr_confidence = 0.0
+                    ocr_fragments = 1
+                    
+                    if self.use_ocr:
+                        try:
+                            # Load image from EPUB item
+                            from PIL import Image
+                            from io import BytesIO
+                            image_data = BytesIO(item.get_content())
+                            img = Image.open(image_data)
+                            
+                            # Use OCR pipeline to extract text from image
+                            ocr_result = self.ocr_pipeline.extract_text_with_ocr(img)
+                            if ocr_result:
+                                ocr_text = ocr_result.get('text', '[Image]')
+                                ocr_confidence = ocr_result.get('avg_confidence', 0.0)
+                                ocr_fragments = ocr_result.get('fragments', 1)
+                            
+                        except Exception as ocr_e:
+                            self.log_error(f"OCR error for image {item.get_name()}: {ocr_e}")
+                    
                     page_result = PageResult(
                         page_number=image_counter,
                         content=f"[Image: {item.get_name()}]",
-                        ocr_page_text="[Image]",
-                        ocr_page_confidence=0.0,
-                        ocr_page_fragments=1
+                        ocr_page_text=ocr_text,
+                        ocr_page_confidence=ocr_confidence,
+                        ocr_page_fragments=ocr_fragments
                     )
                     self.results['pages'][f'page_{image_counter}'] = asdict(page_result)
                     image_counter += 1
