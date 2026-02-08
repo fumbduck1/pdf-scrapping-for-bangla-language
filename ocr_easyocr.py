@@ -21,14 +21,15 @@ def map_easyocr_langs(ocr_lang: str):
     return codes or ["en"]
 
 def get_easyocr_reader(ocr_lang: str, gpu: bool, lock: threading.Lock, existing_reader, log, log_error):
-    if not EASYOCR_AVAILABLE:
+    if not EASYOCR_AVAILABLE or easyocr is None:
         return None
     try:
         with lock:
             if existing_reader is not None:
                 return existing_reader
             langs = map_easyocr_langs(ocr_lang)
-            reader = easyocr.Reader(langs, gpu=gpu)
+            # Type assertion to tell Pylance that easyocr is not None here
+            reader = easyocr.Reader(langs, gpu=gpu)  # type: ignore
             if log:
                 try:
                     log(f"EasyOCR initialized (langs: {','.join(langs)})")

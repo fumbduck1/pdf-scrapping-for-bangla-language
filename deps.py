@@ -2,9 +2,10 @@ import os
 import sys
 import shutil
 from pathlib import Path
+from typing import Optional, Any
 
-torch = None
-torchvision = None
+torch: Optional[Any] = None
+torchvision: Optional[Any] = None
 
 
 def _ensure_torch_imported():
@@ -35,10 +36,10 @@ def detect_torch_device():
 
     info["installed"] = True
     try:
-        if torch.cuda.is_available():
+        if torch.cuda.is_available():  # type: ignore
             name = None
             try:
-                name = torch.cuda.get_device_name(0)
+                name = torch.cuda.get_device_name(0)  # type: ignore
             except Exception:
                 name = "cuda:0"
             info.update({
@@ -51,7 +52,7 @@ def detect_torch_device():
         info["reason"] = f"cuda check failed: {e}"
 
     try:
-        mps_ok = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        mps_ok = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()  # type: ignore
     except Exception:
         mps_ok = False
     if mps_ok:
@@ -76,13 +77,13 @@ def log_torch_env():
         return
 
     device = detect_torch_device()
-    print("torch:", torch.__version__)
-    print("torchvision:", torchvision.__version__)
+    print("torch:", torch.__version__)  # type: ignore
+    print("torchvision:", torchvision.__version__)  # type: ignore
     print("device backend:", device.get("backend"))
     print("device:", device.get("device"))
     print("reason:", device.get("reason"))
     
-PdfReader = None
+PdfReader: Optional[Any] = None
 PYPDF_AVAILABLE = False
 
 # Compatibility alias for existing code/test compatibility
@@ -97,7 +98,7 @@ def _lazy_import_pdf2image():
     return None, None
 
 
-def check_pdftoppm_available(poppler_path: str = None) -> bool:
+def check_pdftoppm_available(poppler_path: Optional[str] = None) -> bool:
     """Check if pdftoppm command is available."""
     global PDFTOPPM_AVAILABLE
     
@@ -136,9 +137,9 @@ def _lazy_import_pypdf():
     return PdfReader
 
 
-np = None
+np: Optional[Any] = None
 EASYOCR_AVAILABLE = False
-easyocr = None
+easyocr: Optional[Any] = None
 
 
 def _lazy_import_numpy():
@@ -172,13 +173,13 @@ try:
     import pytesseract
     TESSERACT_AVAILABLE = True
 except ImportError:
-    pytesseract = None
+    pytesseract: Optional[Any] = None
     TESSERACT_AVAILABLE = False
 
 
 def _bootstrap_tesseract_default_paths():
     """Set default tesseract binary if installed in common locations."""
-    if not TESSERACT_AVAILABLE or not hasattr(pytesseract, "pytesseract"):
+    if not TESSERACT_AVAILABLE or pytesseract is None or not hasattr(pytesseract, "pytesseract"):
         return
     cmd = pytesseract.pytesseract
     if getattr(cmd, "tesseract_cmd", None) and Path(cmd.tesseract_cmd).is_file():
@@ -257,7 +258,7 @@ def detect_poppler_path():
     return None
 
 # EPUB support
-epub_lib = None
+epub_lib: Optional[Any] = None
 EPUBLIB_AVAILABLE = False
 
 def _lazy_import_epublib():

@@ -139,6 +139,9 @@ class PdfRenderer:
     @timer("pdf_rendering")
     def render_page(self, page_num, zoom, fmt="png"):
         """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
+        # Define PENDING at method level to ensure it's in scope for all branches
+        PENDING = object()
+        
         # Check if we have a cached render (atomic operation)
         cache_key = (page_num, zoom, fmt)
         if self._render_cache is not None:
@@ -150,7 +153,6 @@ class PdfRenderer:
                 
                 # If not in cache, add a placeholder to prevent duplicate renders
                 # by other threads
-                PENDING = object()
                 self._render_cache[cache_key] = PENDING
                 
         # Check if pdftoppm is available
@@ -221,7 +223,7 @@ class PdfRenderer:
             render_img = Image.open(BytesIO(result.stdout))
             
             render_path = None
-            if self.persist_renders:
+            if self.persist_renders and self.renders_dir:
                 render_filename = f"page_{page_num:03d}_render.{fmt}"
                 render_path = os.path.join(self.renders_dir, render_filename)
                 try:
@@ -254,8 +256,6 @@ class PdfRenderer:
                 with self._render_cache_lock:
                     if self._render_cache.get(cache_key) is PENDING:
                         del self._render_cache[cache_key]
-            raise
-        except Exception as e:
             self._log_error(f"Render error (page {page_num + 1}): {e}")
             return None
 
@@ -892,8 +892,12 @@ class PDFScraper:
     def _worker_count(self):
         """Optimized worker pool size for parallel OCR processing."""
         try:
-            if getattr(self, "max_workers_override", None):
-                return max(1, int(self.max_workers_override))
+            if getattr(self, "max_workers_override", None) is not None:
+                override = self.max_workers_override
+                if isinstance(override, (int, float)) and not isinstance(override, bool):
+                    return max(1, int(override))
+                elif isinstance(override, str) and override.strip().isdigit():
+                    return max(1, int(override.strip()))
             cores = os.cpu_count() or 2
             langs = _split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
             has_ben = "ben" in langs
@@ -984,7 +988,7 @@ class PDFScraper:
             return False
         self.doc = self.renderer.doc
         try:
-            page_count = len(self.doc.pages)
+            page_count = len(self.doc.pages) if self.doc and hasattr(self.doc, 'pages') else 0
             size_mb = round(os.path.getsize(self.pdf_path) / (1024 * 1024), 2)
         except Exception:
             page_count = 0
@@ -1151,6 +1155,9 @@ class PDFScraper:
             return False
         
         try:
+            if not self.doc or not hasattr(self.doc, 'pages'):
+                return False
+                
             total_pages = len(self.doc.pages)
             page_results = {}
             ocr_futures = []

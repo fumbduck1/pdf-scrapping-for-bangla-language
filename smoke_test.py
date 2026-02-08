@@ -29,7 +29,7 @@ def main():
         raise SystemExit(f"Sample PDF not found: {pdf}")
 
     job = create_job_config(
-        pdf_path=str(pdf),
+        input_path=str(pdf),
         output_root=args.output,
         ocr_lang=args.lang,
         quality_mode=not args.fast,

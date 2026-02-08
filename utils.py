@@ -18,7 +18,7 @@ from deps import (
 )
 
 
-def _sanitize_tessdata_prefix(prefix: str):
+def _sanitize_tessdata_prefix(prefix: str | None):
     """Return a clean absolute tessdata prefix without stray quotes."""
     if not prefix:
         return None
@@ -173,7 +173,12 @@ def check_poppler_ready():
     ppm = shutil.which("pdftoppm")
     cairo = shutil.which("pdftocairo")
     if ppm or cairo:
-        path_hint = Path(ppm).parent if ppm else Path(cairo).parent
+        if ppm:
+            path_hint = Path(ppm).parent
+        elif cairo:
+            path_hint = Path(cairo).parent
+        else:
+            return False, "Poppler not found; raster OCR will be skipped (install poppler utilities or set POPPLER_PATH)"
         return True, f"poppler ok ({path_hint})"
 
     return False, "Poppler not found; raster OCR will be skipped (install poppler utilities or set POPPLER_PATH)"

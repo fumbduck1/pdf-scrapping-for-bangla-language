@@ -212,7 +212,7 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
         if q_levels and q_levels > 0:
             try:
                 method = getattr(Image, "MEDIANCUT", 1)
-                dither = Image.FLOYDSTEINBERG if q_dither else Image.NONE
+                dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
                 quantized = img.quantize(colors=q_levels, method=method, dither=dither)
                 img = quantized.convert('L')
                 if has_ben and not fast_mode:
@@ -220,7 +220,7 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
             except Exception:
                 try:
                     method = getattr(Image, "FASTOCTREE", 2)
-                    dither = Image.FLOYDSTEINBERG if q_dither else Image.NONE
+                    dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
                     img = img.quantize(colors=q_levels, method=method, dither=dither).convert('L')
                 except Exception:
                     pass

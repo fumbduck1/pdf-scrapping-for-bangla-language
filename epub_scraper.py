@@ -7,6 +7,7 @@ from io import BytesIO
 from datetime import datetime
 from collections import OrderedDict
 from dataclasses import dataclass, asdict
+from typing import Any
 
 from PIL import Image
 
@@ -14,7 +15,7 @@ from config_manager import JobConfig
 from deps import _lazy_import_epublib, EPUBLIB_AVAILABLE, EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
 
 # Lazy import for ebooklib to prevent ImportError when module not installed
-epub = None
+epub: Any = None
 from scraper import PageResult
 from logger import get_logger
 

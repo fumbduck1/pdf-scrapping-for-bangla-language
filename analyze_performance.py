@@ -24,7 +24,7 @@ def analyze_performance():
     
     # Create a job configuration
     config = create_job_config(
-        pdf_path=test_pdf_path,
+        input_path=test_pdf_path,
         output_root=output_dir,
         use_ocr=True,
         ocr_method="easyocr",
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         
         # Create a job configuration
         config = create_job_config(
-            pdf_path=test_pdf_path,
+            input_path=test_pdf_path,
             output_root=output_dir,
             use_ocr=True,
             ocr_method="easyocr",
@@ -116,14 +116,14 @@ if __name__ == "__main__":
             persist_renders=False,
             max_workers=4
         )
-        
+            
         monitor = get_monitor()
         monitor.clear()
-        
+            
         start_time = time.time()
         result = run_pdf_job(config, stop_event=None, log_cb=print)
         total_time = time.time() - start_time
-        
+            
         print_performance_report()
     else:
         # Run with default test file

@@ -151,8 +151,15 @@ class ConfigManager:
             text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", text_layer_section.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS)),
         )
         
-        # Support both input_path and pdf_path for backward compatibility
+         # Support both input_path and pdf_path for backward compatibility
         input_path = config_dict.get("input_path", config_dict.get("pdf_path"))
+        if input_path is None:
+            input_path = ""
+            
+        # Ensure input_path is a string
+        if not isinstance(input_path, str):
+            input_path = str(input_path)
+            
         return JobConfig(
             input_path=input_path,
             output_root=config_dict["output_root"],
@@ -247,20 +254,20 @@ class ConfigManager:
     
     def from_file(self, config_path: str) -> JobConfig:
         """Load configuration from file (JSON or YAML)"""
-        config_path = Path(config_path)
+        path_obj = Path(config_path)
         
-        if config_path.suffix == ".json":
+        if path_obj.suffix == ".json":
             import json
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(path_obj, "r", encoding="utf-8") as f:
                 config_dict = json.load(f)
         
-        elif config_path.suffix in (".yaml", ".yml"):
+        elif path_obj.suffix in (".yaml", ".yml"):
             import yaml
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(path_obj, "r", encoding="utf-8") as f:
                 config_dict = yaml.safe_load(f)
         
         else:
-            raise ValueError(f"Unsupported config file format: {config_path.suffix}")
+            raise ValueError(f"Unsupported config file format: {path_obj.suffix}")
         
         return self.from_dict(config_dict)
     
@@ -333,11 +340,11 @@ def get_config_manager() -> ConfigManager:
     return config_manager
 
 
-def create_job_config(input_path: str, output_root: str, **kwargs) -> JobConfig:
+def create_job_config(input_path: str, output_root: str | None = None, **kwargs) -> JobConfig:
     """Create a new job configuration"""
     config_dict = {
         "input_path": input_path,
-        "output_root": output_root,
+        "output_root": output_root or "",
         **kwargs
     }
     return config_manager.from_dict(config_dict)

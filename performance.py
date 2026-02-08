@@ -151,7 +151,7 @@ def get_monitor() -> PerformanceMonitor:
     return monitor
 
 
-def timer(name: str = None, units: str = "seconds"):
+def timer(name: Optional[str] = None, units: str = "seconds"):
     """Decorator for timing function calls"""
     def decorator(func: Callable):
         @functools.wraps(func)
