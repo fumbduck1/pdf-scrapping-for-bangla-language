@@ -1173,7 +1173,7 @@ class PDFScraper:
                     if self.progress_callback:
                         try:
                             self.progress_callback(progress)
-                        except (TypeError, ValueError) as e:
+                        except Exception as e:
                             self.log(f"Error in progress callback: {str(e)}")
                     page_text = ""
                     page_level_ocr = None

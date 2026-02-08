@@ -165,8 +165,9 @@ class EPUBScraper:
         if self.progress_callback:
             try:
                 self.progress_callback(message)
-            except Exception:
-                pass
+            except Exception as e:
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.error(f"Error in progress callback: {str(e)}")
         if hasattr(self, 'logger') and self.logger:
             self.logger.info(message)
     
@@ -176,8 +177,9 @@ class EPUBScraper:
         if self.progress_callback:
             try:
                 self.progress_callback(f"ERROR: {message}")
-            except Exception:
-                pass
+            except Exception as e:
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.error(f"Error in progress callback: {str(e)}")
         if hasattr(self, 'logger') and self.logger:
             self.logger.error(message)
     
@@ -254,8 +256,8 @@ class EPUBScraper:
             if self.progress_callback:
                 try:
                     self.progress_callback(progress)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f"Error in progress callback: {str(e)}")
                 
             if isinstance(item, epub.EpubHtml):
                 chapter_title = self._extract_chapter_title(item)
