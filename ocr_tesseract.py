@@ -7,11 +7,11 @@ from constants import (
 )
 from deps import pytesseract
 from preprocess import upscale_for_retry
-from utils import _split_langs
+from utils import split_langs
 from PIL import ImageFilter
 
 def build_tess_config(ocr_lang: str, quality_mode: bool, extra=None, psm=None):
-    langs = _split_langs(ocr_lang) if ocr_lang else []
+    langs = split_langs(ocr_lang) if ocr_lang else []
     has_ben = "ben" in langs
     has_eng = "eng" in langs
     mode = psm or 6

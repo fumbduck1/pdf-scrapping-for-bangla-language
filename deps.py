@@ -23,9 +23,17 @@ def _ensure_torch_imported():
         return False
 
 
-def detect_torch_device():
+from typing import TypedDict
+
+class TorchDeviceInfo(TypedDict):
+    installed: bool
+    backend: str
+    device: str
+    reason: str
+
+def detect_torch_device() -> TorchDeviceInfo:
     """Return a dict describing the best-available torch device."""
-    info = {
+    info: TorchDeviceInfo = {
         "installed": False,
         "backend": "cpu",
         "device": "cpu",
@@ -84,13 +92,13 @@ def log_torch_env():
     print("reason:", device.get("reason"))
     
 PdfReader: Optional[Any] = None
-PYPDF_AVAILABLE = False
+pypdf_available = False
 
 # Compatibility alias for existing code/test compatibility
 PDF2IMAGE_AVAILABLE = False
 
 # Poppler commands availability
-PDFTOPPM_AVAILABLE = False
+pdftoppm_available = False
 
 
 def _lazy_import_pdf2image():
@@ -100,45 +108,45 @@ def _lazy_import_pdf2image():
 
 def check_pdftoppm_available(poppler_path: Optional[str] = None) -> bool:
     """Check if pdftoppm command is available."""
-    global PDFTOPPM_AVAILABLE
+    global pdftoppm_available
     
     import shutil
     
-    if PDFTOPPM_AVAILABLE:
+    if pdftoppm_available:
         return True
         
     # Try to find pdftoppm in poppler path or system PATH
     if poppler_path:
         pdftoppm_path = Path(poppler_path) / ("pdftoppm.exe" if sys.platform.startswith("win") else "pdftoppm")
         if pdftoppm_path.exists() and pdftoppm_path.is_file():
-            PDFTOPPM_AVAILABLE = True
+            pdftoppm_available = True
             return True
             
     # Check system PATH
     if shutil.which("pdftoppm"):
-        PDFTOPPM_AVAILABLE = True
+        pdftoppm_available = True
         return True
         
     return False
 
 
 def _lazy_import_pypdf():
-    global PdfReader, PYPDF_AVAILABLE
+    global PdfReader, pypdf_available
     if PdfReader is not None:
-        PYPDF_AVAILABLE = True
+        pypdf_available = True
         return PdfReader
     try:
         from pypdf import PdfReader as _PdfReader
         PdfReader = _PdfReader
-        PYPDF_AVAILABLE = True
+        pypdf_available = True
     except ImportError:
         PdfReader = None
-        PYPDF_AVAILABLE = False
+        pypdf_available = False
     return PdfReader
 
 
 np: Optional[Any] = None
-EASYOCR_AVAILABLE = False
+easyocr_available = False
 easyocr: Optional[Any] = None
 
 
@@ -155,31 +163,31 @@ def _lazy_import_numpy():
 
 
 def _lazy_import_easyocr():
-    global easyocr, EASYOCR_AVAILABLE
+    global easyocr, easyocr_available
     if easyocr is not None:
         return easyocr
     try:
         import easyocr as _easyocr
         easyocr = _easyocr
-        EASYOCR_AVAILABLE = True
+        easyocr_available = True
     except ImportError:
         easyocr = None
-        EASYOCR_AVAILABLE = False
+        easyocr_available = False
     return easyocr
 
 
 # Tesseract
 try:
     import pytesseract
-    TESSERACT_AVAILABLE = True
+    tesseract_available = True
 except ImportError:
     pytesseract: Optional[Any] = None
-    TESSERACT_AVAILABLE = False
+    tesseract_available = False
 
 
 def _bootstrap_tesseract_default_paths():
     """Set default tesseract binary if installed in common locations."""
-    if not TESSERACT_AVAILABLE or pytesseract is None or not hasattr(pytesseract, "pytesseract"):
+    if not tesseract_available or pytesseract is None or not hasattr(pytesseract, "pytesseract"):
         return
     cmd = pytesseract.pytesseract
     if getattr(cmd, "tesseract_cmd", None) and Path(cmd.tesseract_cmd).is_file():
@@ -223,7 +231,7 @@ def detect_poppler_path():
         if env_candidate.exists() and _poppler_bins_exist(env_candidate):
             return str(env_candidate)
 
-    candidates = []
+    candidates: list[Path] = []
     if sys.platform.startswith("win"):
         pf = os.environ.get("PROGRAMFILES", r"C:\\Program Files")
         pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\\Program Files (x86)")
@@ -259,40 +267,55 @@ def detect_poppler_path():
 
 # EPUB support
 epub_lib: Optional[Any] = None
-EPUBLIB_AVAILABLE = False
+epublib_available = False
 
 def _lazy_import_epublib():
-    global epub_lib, EPUBLIB_AVAILABLE
+    global epub_lib, epublib_available
     if epub_lib is not None:
         return epub_lib
     try:
         from ebooklib import epub
         epub_lib = epub
-        EPUBLIB_AVAILABLE = True
+        epublib_available = True
     except ImportError as e:
         print(f"EPUB library import error: {e}")
         epub_lib = None
-        EPUBLIB_AVAILABLE = False
+        epublib_available = False
     return epub_lib
 
 # Initialize on module import
 _lazy_import_epublib()
 
+# Backward compatibility aliases
+PYPDF_AVAILABLE = pypdf_available
+PDFTOPPM_AVAILABLE = pdftoppm_available
+EASYOCR_AVAILABLE = easyocr_available
+TESSERACT_AVAILABLE = tesseract_available
+EPUBLIB_AVAILABLE = epublib_available
 
 __all__ = [
     "PdfReader",
+    "pypdf_available",
     "PYPDF_AVAILABLE",
+    "pdftoppm_available",
     "PDFTOPPM_AVAILABLE",
     "check_pdftoppm_available",
     "np",
     "easyocr",
+    "easyocr_available",
     "EASYOCR_AVAILABLE",
     "pytesseract",
+    "tesseract_available",
     "TESSERACT_AVAILABLE",
     "log_torch_env",
     "detect_torch_device",
     "detect_poppler_path",
     "epub_lib",
+    "epublib_available",
     "EPUBLIB_AVAILABLE",
     "_lazy_import_epublib",
+    "_lazy_import_pypdf",
+    "_lazy_import_numpy",
+    "_lazy_import_easyocr",
+    "_lazy_import_pdf2image",
 ]

@@ -1,4 +1,5 @@
-from logger import get_logger, debug, info, warning, error, critical, exception
+
+from typing import Any
 import re
 import os
 import sys
@@ -45,7 +46,6 @@ import preprocess as preproc
 import ocr_easyocr as ocr_e
 import ocr_tesseract as ocr_t
 from deps import (
-    _lazy_import_pypdf,
     EASYOCR_AVAILABLE,
     pytesseract,
     TESSERACT_AVAILABLE,
@@ -57,14 +57,14 @@ from deps import (
 # Compatibility layer for existing tests that mock this
 _lazy_import_pdf2image = None
 from utils import (
-    _sanitize_tessdata_prefix,
-    _split_langs,
+    sanitize_tessdata_prefix,
+    split_langs,
     validate_runtime_env,
     resolve_tesseract_cmd,
     normalize_text,
     bangla_ratio,
 )
-from performance import get_monitor, timer, profile, register_metrics
+from performance import timer, register_metrics  # unused: get_monitor, profile
 
 # Register performance metrics
 register_metrics()
@@ -116,8 +116,9 @@ class PdfRenderer:
 
     def open_pdf(self):
         """Open the PDF into memory or file handle depending on size."""
-        PdfReader = _lazy_import_pypdf()
-        if not PdfReader:
+        try:
+            from pypdf import PdfReader
+        except ImportError:
             self._log_missing("pypdf not installed. Install with: pip install pypdf", err_key="pypdf")
             return False
         try:
@@ -319,7 +320,10 @@ class OcrPipeline:
     """OCR orchestrator that encapsulates EasyOCR/Tesseract strategies."""
 
     def __init__(self, ocr_method, ocr_lang, quality_mode, fast_mode, fast_conf_skip, tessdata_dir, log, log_error,
-                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT, watermark_flatten=WATERMARK_FLATTEN, watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD):
+                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT, watermark_flatten=WATERMARK_FLATTEN, watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
+                 auto_append_eng_for_ben=AUTO_APPEND_ENG_FOR_BEN, segment_retry_conf=SEGMENT_RETRY_CONF,
+                 easyocr_fallback_conf=EASYOCR_FALLBACK_CONF, easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
+                 tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS):
         self.ocr_method = ocr_method
         self.ocr_method_effective = ocr_method
         self.ocr_lang = ocr_lang
@@ -329,7 +333,12 @@ class OcrPipeline:
         self.header_footer_crop_pct = header_footer_crop_pct
         self.watermark_flatten = watermark_flatten
         self.watermark_clip_threshold = watermark_clip_threshold
-        self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir)
+        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir)
+        self.auto_append_eng_for_ben = auto_append_eng_for_ben
+        self.segment_retry_conf = segment_retry_conf
+        self.easyocr_fallback_conf = easyocr_fallback_conf
+        self.easyocr_primary_conf = easyocr_primary_conf
+        self.tesseract_refine_min_chars = tesseract_refine_min_chars
         self.log = log
         self.log_error = log_error
         self._force_easyocr_cpu = str(os.environ.get("EASYOCR_FORCE_CPU", "")).lower() in ("1", "true", "yes", "on")
@@ -339,7 +348,7 @@ class OcrPipeline:
             and self._torch_device.get("installed")
             and self._torch_device.get("backend") == "cuda"
         )
-        self._easyocr_reader = None
+        self._easyocr_reader: Any = None
         self._easyocr_lock = threading.Lock()
         self._engine_logged = False
         self._device_logged = False
@@ -431,7 +440,7 @@ class OcrPipeline:
     def _verify_language_file(self):
         if not self.tessdata_dir:
             return
-        langs = _split_langs(self.ocr_lang) or ["ben"]
+        langs = split_langs(self.ocr_lang) or ["ben"]
         missing = []
         for code in langs:
             lang_file = Path(self.tessdata_dir) / f"{code}.traineddata"
@@ -441,7 +450,7 @@ class OcrPipeline:
             if self.log_error:
                 self.log_error(f"Missing language file(s): {', '.join(missing)}")
             return
-        os.environ["TESSDATA_PREFIX"] = _sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
+        os.environ["TESSDATA_PREFIX"] = sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
 
     def _get_easyocr_reader(self):
         self._log_easyocr_device_once()
@@ -550,7 +559,7 @@ class OcrPipeline:
                     else:
                         text_len = len(best.get('text', '').strip())
                         conf = best.get('avg_confidence', 0)
-                        if conf < EASYOCR_PRIMARY_CONF or text_len < TESSERACT_REFINE_MIN_CHARS:
+                        if conf < self.easyocr_primary_conf or text_len < self.tesseract_refine_min_chars:
                             needs_refine = True
 
                 if needs_refine:
@@ -645,7 +654,7 @@ class OcrPipeline:
                     if self._score_result(alt_best) > self._score_result(best):
                         best = alt_best
 
-                if best is None or best.get('avg_confidence', 0) < SEGMENT_RETRY_CONF or best.get('fragments', 0) < 2:
+                if best is None or best.get('avg_confidence', 0) < self.segment_retry_conf or best.get('fragments', 0) < 2:
                     retry_seg = preproc.upscale_for_retry(seg, scale=THIRD_PASS_SCALE)
                     pass_c = self._run_tesseract_pass(
                         retry_seg,
@@ -656,7 +665,7 @@ class OcrPipeline:
                     if self._score_result(pass_c) > self._score_result(best):
                         best = pass_c
 
-                if best is None or best.get('avg_confidence', 0) < EASYOCR_FALLBACK_CONF:
+                if best is None or best.get('avg_confidence', 0) < self.easyocr_fallback_conf:
                     easy_res = self._run_easyocr_pass(seg)
                     if self._score_result(easy_res) > self._score_result(best):
                         best = easy_res
@@ -751,6 +760,11 @@ class PDFScraper:
         render_cache_max_items=RENDER_CACHE_MAX_ITEMS,
         share_ocr_instances=True,
         ocr_pipeline_factory=None,
+        auto_append_eng_for_ben=AUTO_APPEND_ENG_FOR_BEN,
+        segment_retry_conf=SEGMENT_RETRY_CONF,
+        easyocr_fallback_conf=EASYOCR_FALLBACK_CONF,
+        easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
+        tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS,
     ):
         """Initialize PDF scraper."""
         self.pdf_path = pdf_path
@@ -760,9 +774,14 @@ class PDFScraper:
         self.persist_renders = bool(persist_renders)
         self.max_workers_override = max_workers
         self.user_lang = (ocr_lang or "ben").strip()
+        self.auto_append_eng_for_ben = auto_append_eng_for_ben
+        self.segment_retry_conf = segment_retry_conf
+        self.easyocr_fallback_conf = easyocr_fallback_conf
+        self.easyocr_primary_conf = easyocr_primary_conf
+        self.tesseract_refine_min_chars = tesseract_refine_min_chars
         self.ocr_lang = self.user_lang
-        if AUTO_APPEND_ENG_FOR_BEN:
-            langs = _split_langs(self.ocr_lang) or []
+        if self.auto_append_eng_for_ben:
+            langs = split_langs(self.ocr_lang) or []
             if "ben" in langs and "eng" not in langs:
                 langs.append("eng")
                 self.ocr_lang = "+".join(langs)
@@ -785,7 +804,7 @@ class PDFScraper:
         self.share_ocr_instances = bool(share_ocr_instances)
         self.progress_callback = progress_callback
         self.stop_event = stop_event
-        self.tessdata_dir = _sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
+        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
         self.poppler_path = os.environ.get("POPPLER_PATH") or detect_poppler_path()
         self.results = {
             'metadata': {},
@@ -858,6 +877,11 @@ class PDFScraper:
             max_workers=job_config.max_workers,
             progress_callback=progress_callback,
             stop_event=stop_event,
+            auto_append_eng_for_ben=job_config.ocr.auto_append_eng_for_ben,
+            segment_retry_conf=job_config.ocr.segment_retry_conf,
+            easyocr_fallback_conf=job_config.ocr.easyocr_fallback_conf,
+            easyocr_primary_conf=job_config.ocr.easyocr_primary_conf,
+            tesseract_refine_min_chars=job_config.ocr.tesseract_refine_min_chars,
         )
 
     def _build_ocr_pipeline(self):
@@ -873,6 +897,11 @@ class PDFScraper:
             header_footer_crop_pct=self.header_footer_crop_pct,
             watermark_flatten=self.watermark_flatten,
             watermark_clip_threshold=self.watermark_clip_threshold,
+            auto_append_eng_for_ben=self.auto_append_eng_for_ben,
+            segment_retry_conf=self.segment_retry_conf,
+            easyocr_fallback_conf=self.easyocr_fallback_conf,
+            easyocr_primary_conf=self.easyocr_primary_conf,
+            tesseract_refine_min_chars=self.tesseract_refine_min_chars,
         )
 
     def _get_ocr_pipeline(self):
@@ -899,7 +928,7 @@ class PDFScraper:
                 elif isinstance(override, str) and override.strip().isdigit():
                     return max(1, int(override.strip()))
             cores = os.cpu_count() or 2
-            langs = _split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
+            langs = split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
             has_ben = "ben" in langs
             if has_ben:
                 max_workers = max(2, min(cores - 1, 4))
@@ -926,7 +955,7 @@ class PDFScraper:
             self.log("Warning: tessdata directory not found; set TESSDATA_PREFIX or pass tessdata_dir")
             return
 
-        langs = _split_langs(self.ocr_lang) or ["ben"]
+        langs = split_langs(self.ocr_lang) or ["ben"]
         missing = []
         for code in langs:
             lang_file = Path(self.tessdata_dir) / f"{code}.traineddata"
@@ -938,7 +967,7 @@ class PDFScraper:
             self.log("Tesseract language data not found; install the file or update tessdata path")
             return
 
-        os.environ["TESSDATA_PREFIX"] = _sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
+        os.environ["TESSDATA_PREFIX"] = sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
         self.log(f"Using tessdata: {self.tessdata_dir}; languages: {', '.join(langs)}")
 
         try:
@@ -1183,7 +1212,7 @@ class PDFScraper:
                         page = self.doc.pages[page_num]
 
                         if self.text_layer_first:
-                            langs = _split_langs(self.ocr_lang) or []
+                            langs = split_langs(self.ocr_lang) or []
                             text_layer = self._extract_text_layer(page)
                             if text_layer and len(text_layer) > 5:
                                 use_text_layer = False
@@ -1405,7 +1434,15 @@ class PDFScraper:
             return False
 
 
-def run_pdf_job(job_config: JobConfig, stop_event, log_cb):
+from typing import Callable, Optional, TypedDict, Dict, Any
+
+class JobResult(TypedDict):
+    scrape_ok: bool
+    save_ok: bool
+    stats: Dict[str, Any]
+    output_dir: str
+
+def run_pdf_job(job_config: JobConfig, stop_event: Optional[object], log_cb: Optional[Callable[[str], None]]) -> JobResult:
     """Run a single PDF job using the provided configuration."""
     errors, warnings = validate_runtime_env()
     if errors:

@@ -6,12 +6,12 @@ from deps import _lazy_import_easyocr, _lazy_import_numpy
 easyocr = _lazy_import_easyocr()
 EASYOCR_AVAILABLE = easyocr is not None
 np = _lazy_import_numpy()
-from utils import _split_langs
+from utils import split_langs
 
 
 def map_easyocr_langs(ocr_lang: str):
     codes = []
-    for code in _split_langs(ocr_lang or ""):
+    for code in split_langs(ocr_lang or ""):
         if code.lower() in ("ben", "bn"):
             codes.append("bn")
         elif code.lower() in ("eng", "en"):

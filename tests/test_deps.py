@@ -15,7 +15,7 @@ class TestDeps(unittest.TestCase):
                 return True
 
             @staticmethod
-            def get_device_name(_idx):
+            def get_device_name(_idx: int):
                 return "Fake GPU"
 
         class FakeBackends:
@@ -41,7 +41,7 @@ class TestDeps(unittest.TestCase):
                 return False
 
             @staticmethod
-            def get_device_name(_idx):
+            def get_device_name(_idx: int):
                 return "Fake GPU"
 
         class FakeBackends:
