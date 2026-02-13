@@ -1,6 +1,7 @@
 from typing import Any, Optional
 from PIL import Image
 import threading
+import re
 
 from constants import (
     FAST_MODE,
@@ -279,9 +280,10 @@ class OcrPipeline:
         self._log_easyocr_device_once()
         if self._easyocr_reader is None:
             from deps import _lazy_import_easyocr
-            easyocr, easyocr_available = _lazy_import_easyocr()
+            easyocr = _lazy_import_easyocr()
             
-            if not easyocr_available or easyocr is None:
+            from ocr_easyocr import EASYOCR_AVAILABLE
+            if not EASYOCR_AVAILABLE or easyocr is None:
                 self.log_error("EasyOCR not available")
                 return None
                 

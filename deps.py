@@ -222,7 +222,13 @@ def _lazy_import_easyocr():
     except ImportError:
         easyocr = None
         easyocr_available = False
+    # Update the exposed EASYOCR_AVAILABLE variable
+    global EASYOCR_AVAILABLE
+    EASYOCR_AVAILABLE = easyocr_available
     return easyocr
+
+# Initialize EASYOCR_AVAILABLE
+EASYOCR_AVAILABLE = False
 
 
 # Tesseract

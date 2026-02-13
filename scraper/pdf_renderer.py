@@ -140,6 +140,12 @@ class PdfRenderer:
                             # Move to end only for actual cached values to maintain LRU behavior
                             self._render_cache.pop(cache_key)
                             self._render_cache[cache_key] = cached_val
+                            # Return a copy of the image to prevent "Operation on closed image" errors
+                            # when the original is evicted from cache
+                            if isinstance(cached_val, tuple) and len(cached_val) == 2:
+                                cached_img, render_path = cached_val
+                                if isinstance(cached_img, Image.Image):
+                                    return cached_img.copy(), render_path
                             return cached_val
                     else:
                         # If not in cache, add a placeholder to prevent duplicate renders
@@ -244,7 +250,7 @@ class PdfRenderer:
                     # Notify all waiting threads that the cache has been updated
                     self._render_cache_condition.notify_all()
                         
-            return render_img
+            return render_img.copy()
             
         except RuntimeError as e:
             # Handle pdftoppm not found error

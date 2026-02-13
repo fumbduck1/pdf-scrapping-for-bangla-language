@@ -79,7 +79,7 @@ def run_tesseract_pass(image, ocr_lang: str, quality_mode: bool, psm=None, extra
             work_img,
             lang=ocr_lang,
             config=config,
-            output_type=pytesseract.Output.DICT
+            output_type='dict'
         )
 
         if not data or 'text' not in data:
