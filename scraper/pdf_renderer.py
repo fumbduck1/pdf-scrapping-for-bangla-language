@@ -112,26 +112,21 @@ class PdfRenderer:
                 # Wait for a short time before retrying
                 time.sleep(0.01)
                 
-        # Check if pdftoppm is available
-        if not check_pdftoppm_available(self.poppler_path):
-            # Cleanup the placeholder if we failed to find pdftoppm
-            if self._render_cache is not None:
-                with self._render_cache_lock:
-                    if self._render_cache.get(cache_key) is self._PENDING:
-                        del self._render_cache[cache_key]
-            self._log_missing("pdftoppm (Poppler) not found. Install Poppler or set POPPLER_PATH", err_key="poppler")
-            return None
-            
         dpi = int((zoom or 7.0) * 72)
         dpi = max(dpi, 72)
         try:
             import tempfile
             
-            # Find pdftoppm executable
+            # Find pdftoppm executable with validation
             if self.poppler_path:
                 pdftoppm_cmd = str(Path(self.poppler_path) / ("pdftoppm.exe" if sys.platform.startswith("win") else "pdftoppm"))
+                pdftoppm_path = Path(pdftoppm_cmd)
+                if not pdftoppm_path.exists() or not pdftoppm_path.is_file() or not os.access(pdftoppm_path, os.X_OK):
+                    raise RuntimeError("pdftoppm executable not found; set poppler_path or add to PATH")
             else:
                 pdftoppm_cmd = shutil.which("pdftoppm")
+                if pdftoppm_cmd is None:
+                    raise RuntimeError("pdftoppm executable not found; set poppler_path or add to PATH")
                 
             # Command arguments
             args = [
@@ -205,8 +200,16 @@ class PdfRenderer:
                         
             return render_img
             
+        except RuntimeError as e:
+            # Handle pdftoppm not found error
+            self._log_missing(str(e), err_key="poppler")
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    if self._render_cache.get(cache_key) is self._PENDING:
+                        del self._render_cache[cache_key]
+            return None
         except Exception as e:
-            self.log_error(f"Render failed (page {page_num + 1}): {e}")
+            self._log_error(f"Render failed (page {page_num + 1}): {e}")
             if self._render_cache is not None:
                 with self._render_cache_lock:
                     if self._render_cache.get(cache_key) is self._PENDING:
