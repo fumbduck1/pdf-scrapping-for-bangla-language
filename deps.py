@@ -168,12 +168,12 @@ def _lazy_import_pypdf():
     If `pypdf` is importable this sets the module-level `PdfReader` to the imported class and `pypdf_available` to `True`; otherwise sets `PdfReader` to `None` and `pypdf_available` to `False`. The result is cached so subsequent calls return the previously resolved value.
     
     Returns:
-        PdfReader or None: The `PdfReader` class from `pypdf` if available, `None` otherwise.
+        tuple: (PdfReader or None, bool) - The `PdfReader` class from `pypdf` if available, None otherwise; and a boolean indicating availability.
     """
     global PdfReader, pypdf_available
     if PdfReader is not None:
         pypdf_available = True
-        return PdfReader
+        return PdfReader, pypdf_available
     try:
         from pypdf import PdfReader as _PdfReader
         PdfReader = _PdfReader
@@ -181,7 +181,7 @@ def _lazy_import_pypdf():
     except ImportError:
         PdfReader = None
         pypdf_available = False
-    return PdfReader
+    return PdfReader, pypdf_available
 
 
 np: Optional[Any] = None

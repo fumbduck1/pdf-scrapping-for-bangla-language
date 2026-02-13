@@ -772,7 +772,9 @@ def run_pdf_job(job_config: JobConfig, stop_event: Optional[object], log_cb: Opt
         }
         
     except Exception as e:
-        scraper.log_error(f"Job failed: {e}")
+        import traceback
+        error_trace = traceback.format_exc()
+        scraper.log_error(f"Job failed: {e}\n{error_trace}")
         
         end_time = datetime.now()
         runtime = (end_time - start_time).total_seconds()
@@ -784,6 +786,6 @@ def run_pdf_job(job_config: JobConfig, stop_event: Optional[object], log_cb: Opt
             "num_errors": 1,
             "num_warnings": 0,
             "runtime_seconds": runtime,
-            "errors": [str(e)],
+            "errors": [str(e), error_trace],
             "warnings": [],
         }

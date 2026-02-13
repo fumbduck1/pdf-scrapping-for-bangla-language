@@ -1,0 +1,1663 @@
+
+from typing import Any
+import re
+import os
+import sys
+import threading
+import shutil
+from pathlib import Path
+from datetime import datetime
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
+from dataclasses import dataclass, asdict
+
+from PIL import Image, ImageFilter
+Image.MAX_IMAGE_PIXELS = 500_000_000
+_ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
+
+from constants import (
+    DEFAULT_ZOOM,
+    FAST_MODE,
+    FAST_CONFIDENCE_SKIP,
+    TEXT_LAYER_FIRST,
+    TEXT_LAYER_LANG_MIN_RATIO,
+    TEXT_LAYER_MIN_BEN_CHARS,
+    PDF_BYTES_CACHE_MB,
+    WATERMARK_FLATTEN,
+    WATERMARK_CLIP_THRESHOLD,
+    WATERMARK_RETRY_CONF,
+    HIGH_DPI_RETRY_CONF,
+    HIGH_DPI_ZOOM,
+    AUTO_APPEND_ENG_FOR_BEN,
+    QUALITY_MODE_DEFAULT,
+    SEGMENT_RETRY_CONF,
+    THIRD_PASS_SCALE,
+    EASYOCR_FALLBACK_CONF,
+    EASYOCR_PRIMARY_CONF,
+    TESSERACT_REFINE_MIN_CHARS,
+    HEADER_FOOTER_CROP_PCT,
+    QUANTIZE_LEVELS,
+    QUANTIZE_DITHER,
+    RENDER_CACHE_MAX_ITEMS,
+)
+from config_manager import JobConfig
+import preprocess as preproc
+import ocr_easyocr as ocr_e
+import ocr_tesseract as ocr_t
+from deps import (
+    EASYOCR_AVAILABLE,
+    pytesseract,
+    TESSERACT_AVAILABLE,
+    detect_poppler_path,
+    detect_torch_device,
+    check_pdftoppm_available,
+)
+
+# Compatibility layer for existing tests that mock this
+_lazy_import_pdf2image = None
+from utils import (
+    sanitize_tessdata_prefix,
+    split_langs,
+    validate_runtime_env,
+    resolve_tesseract_cmd,
+    normalize_text,
+    bangla_ratio,
+)
+from performance import timer, register_metrics  # unused: get_monitor, profile
+
+# Register performance metrics
+register_metrics()
+
+
+@dataclass
+class PageResult:
+    page_number: int
+    content: str = ""
+    ocr_page_text: str = ""
+    ocr_page_confidence: float = 0.0
+    ocr_page_fragments: int = 0
+    ocr_render: str = ""
+    warning: str = ""
+    error: str = ""
+
+
+class PdfRenderer:
+    """Rendering helper to manage PDF handles and page rasterization with caching."""
+
+    def __init__(self, pdf_path, output_dir, pdf_bytes_cache_mb, poppler_path, log, log_error, persist_renders=False, render_cache_max_items=RENDER_CACHE_MAX_ITEMS):
+        self.pdf_path = pdf_path
+        self.output_dir = output_dir
+        self.renders_dir = None
+        self._pdf_file_handle = None
+        self._pdf_bytes = None
+        self.doc = None
+        self.pdf_bytes_cache_mb = pdf_bytes_cache_mb
+        self.poppler_path = poppler_path
+        self.log = log
+        self.log_error = log_error
+        self.persist_renders = persist_renders
+        self.render_cache_max_items = max(int(render_cache_max_items or 0), 0)
+        self.setup_directories()
+
+        # Page cache for rendered images (bounded LRU)
+        self._render_cache = OrderedDict() if self.render_cache_max_items > 0 else None
+        self._render_cache_lock = threading.Lock()
+
+    def setup_directories(self):
+        if not self.persist_renders:
+            return
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.renders_dir = os.path.join(self.output_dir, 'renders')
+            os.makedirs(self.renders_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    def open_pdf(self):
+        """Open the PDF into memory or file handle depending on size."""
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            self._log_missing("pypdf not installed. Install with: pip install pypdf", err_key="pypdf")
+            return False
+        try:
+            size_bytes = os.path.getsize(self.pdf_path)
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            if size_mb <= self.pdf_bytes_cache_mb:
+                self._pdf_bytes = Path(self.pdf_path).read_bytes()
+                self.doc = PdfReader(BytesIO(self._pdf_bytes))
+                self._pdf_file_handle = None
+            else:
+                self._pdf_file_handle = open(self.pdf_path, "rb")
+                self.doc = PdfReader(self._pdf_file_handle)
+            return True
+        except Exception as e:
+            self._log_error(f"Open failed: {e}")
+            self.close()
+            return False
+
+    @timer("pdf_rendering")
+    def render_page(self, page_num, zoom, fmt="png"):
+        """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
+        # Define PENDING at method level to ensure it's in scope for all branches
+        PENDING = object()
+        
+        # Check if we have a cached render (atomic operation)
+        cache_key = (page_num, zoom, fmt)
+        if self._render_cache is not None:
+            with self._render_cache_lock:
+                if cache_key in self._render_cache:
+                    cached_val = self._render_cache.pop(cache_key)
+                    self._render_cache[cache_key] = cached_val
+                    return cached_val
+                
+                # If not in cache, add a placeholder to prevent duplicate renders
+                # by other threads
+                self._render_cache[cache_key] = PENDING
+                
+        # Check if pdftoppm is available
+        import shutil
+        from deps import check_pdftoppm_available
+        
+        if not check_pdftoppm_available(self.poppler_path):
+            # Cleanup the placeholder if we failed to find pdftoppm
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    if self._render_cache.get(cache_key) is PENDING:
+                        del self._render_cache[cache_key]
+            self._log_missing("pdftoppm (Poppler) not found. Install Poppler or set POPPLER_PATH", err_key="poppler")
+            return None
+            
+        dpi = int((zoom or DEFAULT_ZOOM) * 72)
+        dpi = max(dpi, 72)
+        try:
+            import subprocess
+            import tempfile
+            
+            # Find pdftoppm executable
+            if self.poppler_path:
+                pdftoppm_cmd = str(Path(self.poppler_path) / ("pdftoppm.exe" if sys.platform.startswith("win") else "pdftoppm"))
+            else:
+                pdftoppm_cmd = shutil.which("pdftoppm")
+                
+            # Command arguments
+            args = [
+                pdftoppm_cmd,
+                "-f", str(page_num + 1),
+                "-l", str(page_num + 1),
+                "-r", str(dpi),
+                "-png"  # Always use PNG for best quality
+            ]
+            
+            # Handle case where PDF is in memory
+            input_path = None
+            temp_file = None
+            if self._pdf_bytes:
+                # Write PDF bytes to temporary file
+                temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                temp_file.write(self._pdf_bytes)
+                temp_file.close()
+                input_path = temp_file.name
+            else:
+                input_path = self.pdf_path
+                
+            # Execute pdftoppm
+            result = subprocess.run(
+                args + [input_path],
+                capture_output=True,
+                text=False
+            )
+            
+            # Cleanup temporary file if created
+            if temp_file:
+                try:
+                    os.unlink(temp_file.name)
+                except Exception:
+                    pass
+                    
+            if result.returncode != 0:
+                raise RuntimeError(f"pdftoppm failed: {result.stderr.decode('utf-8', 'ignore')}")
+                
+            # Convert ppm output to PIL Image
+            from io import BytesIO
+            render_img = Image.open(BytesIO(result.stdout))
+            
+            render_path = None
+            if self.persist_renders and self.renders_dir:
+                render_filename = f"page_{page_num:03d}_render.{fmt}"
+                render_path = os.path.join(self.renders_dir, render_filename)
+                try:
+                    render_img.save(render_path, fmt.upper())
+                except Exception:
+                    render_path = None
+
+            # Cache the render (atomic operation)
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    # Check if the entry is still our placeholder
+                    if self._render_cache.get(cache_key) is PENDING:
+                        # Replace placeholder with actual render
+                        self._render_cache[cache_key] = (render_img, render_path)
+                        if len(self._render_cache) > self.render_cache_max_items:
+                            # Explicitly close the oldest image before removing from cache
+                            old_img, _ = self._render_cache.popitem(last=False)
+                            if hasattr(old_img, 'close'):
+                                old_img.close()
+                    else:
+                        # If another thread already replaced the placeholder,
+                        # use that instead of the one we just rendered
+                        render_img.close()
+                        render_img, render_path = self._render_cache[cache_key]
+            
+            return render_img, render_path
+        except Exception as e:
+            # Cleanup the placeholder if rendering failed
+            if self._render_cache is not None:
+                with self._render_cache_lock:
+                    if self._render_cache.get(cache_key) is PENDING:
+                        del self._render_cache[cache_key]
+            self._log_error(f"Render error (page {page_num + 1}): {e}")
+            return None
+
+    def cleanup_renders(self):
+        if not self.persist_renders:
+            return
+        try:
+            if self.renders_dir and os.path.isdir(self.renders_dir):
+                shutil.rmtree(self.renders_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if self._pdf_file_handle:
+                self._pdf_file_handle.close()
+        except Exception:
+            pass
+        self._pdf_file_handle = None
+        self._pdf_bytes = None
+        self.doc = None
+        # Clear render cache to release PIL Image resources and prevent OOM
+        if self._render_cache is not None:
+            with self._render_cache_lock:
+                for render_img, _ in self._render_cache.values():
+                    if hasattr(render_img, 'close'):
+                        render_img.close()
+                self._render_cache.clear()
+
+    def _log_missing(self, msg, err_key=None):
+        try:
+            if self.log:
+                self.log(msg)
+            if self.log_error:
+                self.log_error(f"Missing dependency: {err_key or msg}")
+        except Exception:
+            pass
+
+    def _log_error(self, msg):
+        try:
+            if self.log:
+                self.log(msg)
+            if self.log_error:
+                self.log_error(msg)
+        except Exception:
+            pass
+
+
+def _sentence_chunks(text: str):
+    """Split text into rough sentences/clauses using Bangla/English punctuation."""
+    if not text:
+        return []
+    # Normalize whitespace
+    cleaned = '\n'.join(' '.join(line.split()) for line in text.splitlines())
+    # Split on Bangla danda or common sentence enders
+    parts = re.split(r"(?<=[।!?])\s+", cleaned)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+class OcrPipeline:
+    """OCR orchestrator that encapsulates EasyOCR/Tesseract strategies."""
+
+    def __init__(self, ocr_method, ocr_lang, quality_mode, fast_mode, fast_conf_skip, tessdata_dir, log, log_error,
+                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT, watermark_flatten=WATERMARK_FLATTEN, watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
+                 auto_append_eng_for_ben=AUTO_APPEND_ENG_FOR_BEN, segment_retry_conf=SEGMENT_RETRY_CONF,
+                 easyocr_fallback_conf=EASYOCR_FALLBACK_CONF, easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
+                 tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS):
+        self.ocr_method = ocr_method
+        self.ocr_method_effective = ocr_method
+        self.ocr_lang = ocr_lang
+        self.quality_mode = quality_mode
+        self.fast_mode = fast_mode
+        self.fast_conf_skip = fast_conf_skip
+        self.header_footer_crop_pct = header_footer_crop_pct
+        self.watermark_flatten = watermark_flatten
+        self.watermark_clip_threshold = watermark_clip_threshold
+        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir)
+        self.auto_append_eng_for_ben = auto_append_eng_for_ben
+        self.segment_retry_conf = segment_retry_conf
+        self.easyocr_fallback_conf = easyocr_fallback_conf
+        self.easyocr_primary_conf = easyocr_primary_conf
+        self.tesseract_refine_min_chars = tesseract_refine_min_chars
+        self.log = log
+        self.log_error = log_error
+        self._force_easyocr_cpu = str(os.environ.get("EASYOCR_FORCE_CPU", "")).lower() in ("1", "true", "yes", "on")
+        self._torch_device = detect_torch_device()
+        self._easyocr_gpu = (
+            not self._force_easyocr_cpu
+            and self._torch_device.get("installed")
+            and self._torch_device.get("backend") == "cuda"
+        )
+        self._easyocr_reader: Any = None
+        self._easyocr_lock = threading.Lock()
+        self._engine_logged = False
+        self._device_logged = False
+        self._ensure_tesseract_cmd()
+
+    # --- shared helpers ---
+    def _normalize_text(self, text):
+        return normalize_text(text)
+
+    def _maybe_split_columns(self, image):
+        return preproc.maybe_split_columns(image, fast_mode=self.fast_mode)
+
+    def _flatten_background(self, image, clip=None):
+        clip_val = self.watermark_clip_threshold if clip is None else clip
+        return preproc.flatten_background(image, clip=clip_val)
+
+    def _choose_psm(self, image, segment_count):
+        return preproc.choose_psm(image, segment_count)
+
+    def _score_result(self, res):
+        return ocr_t.score_result(res)
+
+    def _log_easyocr_device_once(self):
+        if self._device_logged:
+            return
+        self._device_logged = True
+        if self._force_easyocr_cpu:
+            if self.log:
+                self.log("EasyOCR: CPU forced via EASYOCR_FORCE_CPU")
+            return
+        if not self._torch_device.get("installed"):
+            if self.log:
+                self.log("EasyOCR: torch not installed; CPU mode")
+            return
+        backend = self._torch_device.get("backend")
+        reason = self._torch_device.get("reason")
+        if backend == "cuda" and self._easyocr_gpu:
+            if self.log:
+                self.log(f"EasyOCR: using CUDA ({reason})")
+        elif backend == "mps":
+            if self.log:
+                self.log("EasyOCR: MPS detected; running CPU because EasyOCR expects CUDA")
+        else:
+            if self.log:
+                self.log(f"EasyOCR: running on CPU ({reason})")
+
+    def _is_noise_fragment(self, text: str, confidence: float) -> bool:
+        if not text:
+            return True
+        if not self.ocr_lang.startswith('ben'):
+            return False
+        tokens = re.sub(r"[\s\W_]+", "", text)
+        if not tokens:
+            return True
+        ascii_letters = sum(1 for ch in tokens if ch.isascii())
+        bengali_letters = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
+        length = len(tokens)
+        if length <= 4 and confidence < 0.96:
+            return True
+        if bengali_letters == 0 and ascii_letters >= 3 and confidence < 0.93:
+            return True
+        ascii_ratio = ascii_letters / max(length, 1)
+        if ascii_ratio > 0.65 and confidence < 0.9:
+            return True
+        return False
+
+    def _load_image(self, image_or_path):
+        if isinstance(image_or_path, Image.Image):
+            return image_or_path
+        return Image.open(image_or_path)
+
+    def _ensure_tesseract_cmd(self):
+        try:
+            cmd_obj = getattr(pytesseract, 'pytesseract', None)
+            current = getattr(cmd_obj, 'tesseract_cmd', None) if cmd_obj else None
+            if current and Path(current).is_file():
+                return
+            default_paths = [
+                Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"),
+                Path(r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe"),
+            ]
+            for candidate in default_paths:
+                if candidate.is_file() and cmd_obj:
+                    cmd_obj.tesseract_cmd = str(candidate)
+                    break
+        except Exception:
+            pass
+
+    def _verify_language_file(self):
+        if not self.tessdata_dir:
+            return
+        langs = split_langs(self.ocr_lang) or ["ben"]
+        missing = []
+        for code in langs:
+            lang_file = Path(self.tessdata_dir) / f"{code}.traineddata"
+            if not lang_file.is_file():
+                missing.append(str(lang_file))
+        if missing:
+            if self.log_error:
+                self.log_error(f"Missing language file(s): {', '.join(missing)}")
+            return
+        os.environ["TESSDATA_PREFIX"] = sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
+
+    def _get_easyocr_reader(self):
+        self._log_easyocr_device_once()
+        gpu_flag = bool(self._easyocr_gpu)
+        reader = ocr_e.get_easyocr_reader(
+            self.ocr_lang,
+            gpu=gpu_flag,
+            lock=self._easyocr_lock,
+            existing_reader=self._easyocr_reader,
+            log=self.log,
+            log_error=self.log_error,
+        )
+        if reader is not None:
+            self._easyocr_reader = reader
+        return reader
+
+    def _run_easyocr_pass(self, image):
+        reader = self._get_easyocr_reader()
+        res = ocr_e.run_easyocr_pass(image, lock=self._easyocr_lock, reader=reader, log=self.log, log_error=self.log_error)
+        if res and 'text' in res:
+            res['text'] = self._normalize_text(res.get('text', ''))
+        return res
+
+    def _run_tesseract_pass(self, image, extra_config=None, extra_dilate=False, psm=None):
+        return ocr_t.run_tesseract_pass(
+            image,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            psm=psm,
+            extra_config=extra_config,
+            extra_dilate=extra_dilate,
+            log=self.log,
+            log_error=self.log_error,
+        )
+
+    def _tesseract_best_for_segment(self, seg, alt_seg, psm_for_seg):
+        return ocr_t.tesseract_best_for_segment(
+            seg,
+            alt_seg,
+            psm_for_seg,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            fast_conf_skip=self.fast_conf_skip,
+            log=self.log,
+            log_error=self.log_error,
+        )
+
+    def preprocess_image_for_ocr(self, image_path_or_image):
+        return preproc.preprocess_image_for_ocr(
+            image_path_or_image,
+            ocr_lang=self.ocr_lang,
+            fast_mode=self.fast_mode,
+            quality_mode=self.quality_mode,
+            log_fn=self.log,
+        )
+
+    @timer("easyocr_pass")
+    def extract_text_with_easyocr_primary(self, image_path_or_image):
+        if not EASYOCR_AVAILABLE:
+            if self.log:
+                self.log("EasyOCR not installed; falling back to Tesseract")
+            return self.extract_text_with_tesseract(image_path_or_image)
+        try:
+            raw_img = self._load_image(image_path_or_image)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
+            preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
+
+            base_segments_preview = self._maybe_split_columns(preprocessed_img)
+            psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
+            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
+            segments = [(seg, idx) for idx, seg in enumerate(base_segments_preview)]
+
+            combined_text = []
+            total_conf_weighted = 0.0
+            total_fragments = 0
+            refined = False
+
+            if self.ocr_lang.startswith('ben'):
+                try:
+                    preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
+                except Exception:
+                    pass
+                if flattened_img is not None:
+                    try:
+                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
+                    except Exception:
+                        pass
+
+            for seg, idx in segments:
+                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
+                easy_res = self._run_easyocr_pass(seg)
+                alt_easy = self._run_easyocr_pass(alt_seg) if alt_seg is not None else None
+                best = easy_res
+                if self._score_result(alt_easy) > self._score_result(best):
+                    best = alt_easy
+
+                needs_refine = False
+                if TESSERACT_AVAILABLE:
+                    if not best:
+                        needs_refine = True
+                    else:
+                        text_len = len(best.get('text', '').strip())
+                        conf = best.get('avg_confidence', 0)
+                        if conf < self.easyocr_primary_conf or text_len < self.tesseract_refine_min_chars:
+                            needs_refine = True
+
+                if needs_refine:
+                    self._verify_language_file()
+                    tess_best = self._tesseract_best_for_segment(seg, alt_seg, psm_for_seg)
+                    if self._score_result(tess_best) > self._score_result(best):
+                        best = tess_best
+                        refined = True
+
+                if best:
+                    conf_val = best.get('avg_confidence') or 0
+                    text_val = best.get('text', '')
+                    if self._is_noise_fragment(text_val, conf_val):
+                        continue
+                    combined_text.append(text_val)
+                    total_conf_weighted += conf_val * max(best.get('fragments', 1), 1)
+                    total_fragments += max(best.get('fragments', 1), 1)
+
+            if not combined_text:
+                return None
+
+            normalized = self._normalize_text('\n\n'.join(combined_text))
+            avg_conf = (total_conf_weighted / total_fragments) if total_fragments else 0.0
+            self.ocr_method_effective = "easyocr+tesseract" if refined and TESSERACT_AVAILABLE else "easyocr"
+            return {
+                'text': normalized,
+                'avg_confidence': round(avg_conf, 4),
+                'fragments': total_fragments
+            }
+        except Exception as e:
+            if self.log:
+                self.log(f"EasyOCR-first error: {str(e)}")
+            if self.log_error:
+                self.log_error(f"EasyOCR-first error: {e}")
+            return None
+
+    @timer("tesseract_pass")
+    def extract_text_with_tesseract(self, image_path_or_image):
+        if not TESSERACT_AVAILABLE:
+            if self.log:
+                self.log("Tesseract not installed. Install tesseract-ocr and pytesseract")
+            return None
+        self._verify_language_file()
+        try:
+            raw_img = self._load_image(image_path_or_image)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
+            preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
+
+            base_segments_preview = self._maybe_split_columns(preprocessed_img)
+            psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
+
+            if self.ocr_lang.startswith('ben'):
+                try:
+                    preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
+                except Exception:
+                    pass
+                if flattened_img is not None:
+                    try:
+                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
+                    except Exception:
+                        pass
+
+            base_segments = base_segments_preview
+            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
+            segments = [(seg, idx) for idx, seg in enumerate(base_segments)]
+
+            combined_text = []
+            total_conf_weighted = 0.0
+            total_fragments = 0
+
+            for seg, idx in segments:
+                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
+
+                pass_a = self._run_tesseract_pass(seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
+                pass_b = None
+                if not pass_a or pass_a.get('avg_confidence', 0) < self.fast_conf_skip:
+                    pass_b = self._run_tesseract_pass(seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
+
+                best = pass_a if self._score_result(pass_a) >= self._score_result(pass_b) else pass_b
+
+                if alt_seg is not None and (not best or best.get('avg_confidence', 0) < WATERMARK_RETRY_CONF):
+                    alt_a = self._run_tesseract_pass(alt_seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
+                    alt_b = None
+                    if not alt_a or alt_a.get('avg_confidence', 0) < self.fast_conf_skip:
+                        alt_b = self._run_tesseract_pass(alt_seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
+                    alt_best = alt_a if self._score_result(alt_a) >= self._score_result(alt_b) else alt_b
+                    if self._score_result(alt_best) > self._score_result(best):
+                        best = alt_best
+
+                if best is None or best.get('avg_confidence', 0) < self.segment_retry_conf or best.get('fragments', 0) < 2:
+                    retry_seg = preproc.upscale_for_retry(seg, scale=THIRD_PASS_SCALE)
+                    pass_c = self._run_tesseract_pass(
+                        retry_seg,
+                        extra_config=["-c lstm_choice_mode=2"],
+                        extra_dilate=True,
+                        psm=psm_for_seg,
+                    )
+                    if self._score_result(pass_c) > self._score_result(best):
+                        best = pass_c
+
+                if best is None or best.get('avg_confidence', 0) < self.easyocr_fallback_conf:
+                    easy_res = self._run_easyocr_pass(seg)
+                    if self._score_result(easy_res) > self._score_result(best):
+                        best = easy_res
+
+                if best:
+                    conf_val = best.get('avg_confidence') or 0
+                    text_val = best.get('text', '')
+                    if self._is_noise_fragment(text_val, conf_val):
+                        continue
+                    combined_text.append(text_val)
+                    total_conf_weighted += conf_val * max(best.get('fragments', 1), 1)
+                    total_fragments += max(best.get('fragments', 1), 1)
+
+            if not combined_text:
+                return None
+
+            normalized = self._normalize_text('\n\n'.join(combined_text))
+            avg_conf = (total_conf_weighted / total_fragments) if total_fragments else 0.0
+            return {
+                'text': normalized,
+                'avg_confidence': round(avg_conf, 4),
+                'fragments': total_fragments
+            }
+        except Exception as e:
+            if self.log:
+                self.log(f"Tesseract OCR error: {str(e)}")
+            if self.log_error:
+                self.log_error(f"Tesseract OCR error: {e}")
+            return None
+
+    def extract_text_with_ocr(self, image_path_or_image):
+        if not self._engine_logged:
+            if self.ocr_method == 'tesseract' or not EASYOCR_AVAILABLE:
+                if self.log:
+                    self.log("Engine: Tesseract (EasyOCR unavailable or not selected)")
+            else:
+                if TESSERACT_AVAILABLE:
+                    if self.log:
+                        self.log("Engine: EasyOCR primary; Tesseract will refine weak segments")
+                else:
+                    if self.log:
+                        self.log("Engine: EasyOCR primary; Tesseract unavailable, refinement skipped")
+            self._engine_logged = True
+
+        if self.ocr_method == 'tesseract':
+            self.ocr_method_effective = 'tesseract'
+            return self.extract_text_with_tesseract(image_path_or_image)
+
+        primary = self.extract_text_with_easyocr_primary(image_path_or_image)
+        if primary is not None:
+            return primary
+
+        if TESSERACT_AVAILABLE:
+            self.ocr_method_effective = 'tesseract'
+            return self.extract_text_with_tesseract(image_path_or_image)
+
+        if self.log:
+            self.log("No OCR engine available")
+        return None
+
+
+class PDFScraper:
+    def __init__(
+        self,
+        pdf_path,
+        output_dir,
+        use_ocr=True,
+        ocr_method='easyocr',
+        ocr_lang='ben',
+        progress_callback=None,
+        tessdata_dir=None,
+        stop_event=None,
+        quality_mode=QUALITY_MODE_DEFAULT,
+        persist_renders=False,
+        max_workers=None,
+        fast_mode=FAST_MODE,
+        fast_confidence_skip=FAST_CONFIDENCE_SKIP,
+        pdf_bytes_cache_mb=PDF_BYTES_CACHE_MB,
+        zoom=DEFAULT_ZOOM,
+        high_dpi_zoom=HIGH_DPI_ZOOM,
+        high_dpi_retry_conf=HIGH_DPI_RETRY_CONF,
+        header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
+        watermark_flatten=WATERMARK_FLATTEN,
+        watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
+        watermark_retry_conf=WATERMARK_RETRY_CONF,
+        quantize_levels=QUANTIZE_LEVELS,
+        quantize_dither=QUANTIZE_DITHER,
+        third_pass_scale=THIRD_PASS_SCALE,
+        text_layer_first=TEXT_LAYER_FIRST,
+        text_layer_lang_min_ratio=TEXT_LAYER_LANG_MIN_RATIO,
+        text_layer_min_ben_chars=TEXT_LAYER_MIN_BEN_CHARS,
+        render_cache_max_items=RENDER_CACHE_MAX_ITEMS,
+        share_ocr_instances=True,
+        ocr_pipeline_factory=None,
+        auto_append_eng_for_ben=AUTO_APPEND_ENG_FOR_BEN,
+        segment_retry_conf=SEGMENT_RETRY_CONF,
+        easyocr_fallback_conf=EASYOCR_FALLBACK_CONF,
+        easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
+        tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS,
+        # Reed-Solomon error correction parameters
+        rs_enabled=False,
+        rs_error_correction_bytes=10,
+        rs_block_size=1024,
+        rs_enable_correction=True,
+        rs_verify_only=False,
+    ):
+        """Initialize PDF scraper."""
+        self.pdf_path = pdf_path
+        self.output_dir = output_dir
+        self.use_ocr = use_ocr
+        self.ocr_method = ocr_method
+        self.persist_renders = bool(persist_renders)
+        self.max_workers_override = max_workers
+        self.user_lang = (ocr_lang or "ben").strip()
+        self.auto_append_eng_for_ben = auto_append_eng_for_ben
+        self.segment_retry_conf = segment_retry_conf
+        self.easyocr_fallback_conf = easyocr_fallback_conf
+        self.easyocr_primary_conf = easyocr_primary_conf
+        self.tesseract_refine_min_chars = tesseract_refine_min_chars
+        
+        # Reed-Solomon error correction parameters
+        self.rs_enabled = rs_enabled
+        self.rs_error_correction_bytes = rs_error_correction_bytes
+        self.rs_block_size = rs_block_size
+        self.rs_enable_correction = rs_enable_correction
+        self.rs_verify_only = rs_verify_only
+        self.rs_corrector = None
+        if self.rs_enabled:
+            try:
+                from rs_correction import RSTextCorrector
+                self.rs_corrector = RSTextCorrector(rs_error_correction_bytes)
+            except ImportError:
+                self.log_error("Reed-Solomon library not available")
+                self.rs_enabled = False
+        self.ocr_lang = self.user_lang
+        if self.auto_append_eng_for_ben:
+            langs = split_langs(self.ocr_lang) or []
+            if "ben" in langs and "eng" not in langs:
+                langs.append("eng")
+                self.ocr_lang = "+".join(langs)
+        self.quality_mode = bool(quality_mode)
+        self.fast_mode = fast_mode
+        self.fast_conf_skip = fast_confidence_skip
+        self.page_render_zoom = zoom
+        self.high_dpi_retry_conf = high_dpi_retry_conf
+        self.high_dpi_zoom = high_dpi_zoom
+        self.header_footer_crop_pct = header_footer_crop_pct
+        self.watermark_flatten = watermark_flatten
+        self.watermark_clip_threshold = watermark_clip_threshold
+        self.watermark_retry_conf = watermark_retry_conf
+        self.quantize_levels = quantize_levels
+        self.quantize_dither = quantize_dither
+        self.third_pass_scale = third_pass_scale
+        self.text_layer_first = text_layer_first
+        self.text_layer_lang_min_ratio = text_layer_lang_min_ratio
+        self.text_layer_min_ben_chars = text_layer_min_ben_chars
+        self.share_ocr_instances = bool(share_ocr_instances)
+        self.progress_callback = progress_callback
+        self.stop_event = stop_event
+        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
+        self.poppler_path = os.environ.get("POPPLER_PATH") or detect_poppler_path()
+        self.results = {
+            'metadata': {},
+            'pages': {},
+            'statistics': {},
+            'extraction_log': []
+        }
+        os.makedirs(self.output_dir, exist_ok=True)
+        from logger import get_logger
+        self.logger = get_logger()
+        
+        # Warn about potential memory issues with parallel processing and separate OCR instances
+        worker_count = self._worker_count()
+        if not self.share_ocr_instances and worker_count > 1:
+            warning_msg = (
+                "WARNING: share_ocr_instances is False and scraper is configured to run with "
+                f"{worker_count} workers. This will create {worker_count} separate OCR pipeline "
+                "instances (each with their own heavy EasyOCR reader), which may cause "
+                "significant memory usage and potential blowups. Consider setting share_ocr_instances=True "
+                "if you encounter memory issues during parallel processing."
+            )
+            if self.logger:
+                self.logger.warning(warning_msg)
+            # Also log to extraction log
+            self.results['extraction_log'].append(warning_msg)
+        
+        # Cache guardrail: cap or disable cache; allow overrides for testing/memory constraints
+        effective_cache_cap = max(int(render_cache_max_items or 0), 0)
+        self.renderer = PdfRenderer(
+            pdf_path=self.pdf_path,
+            output_dir=self.output_dir,
+            pdf_bytes_cache_mb=pdf_bytes_cache_mb,
+            poppler_path=self.poppler_path,
+            log=self.log,
+            log_error=self.log_error,
+            persist_renders=self.persist_renders,
+            render_cache_max_items=effective_cache_cap,
+        )
+        self._ocr_factory = ocr_pipeline_factory or self._build_ocr_pipeline
+        self.ocr = self._ocr_factory()
+
+    @classmethod
+    def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
+        """Construct a PDFScraper directly from a JobConfig to reduce call-site wiring."""
+        return cls(
+            pdf_path=job_config.input_path,
+            output_dir=os.path.join(job_config.output_root, Path(job_config.input_path).stem),
+            use_ocr=job_config.use_ocr,
+            ocr_method=job_config.ocr.ocr_method,
+            ocr_lang=job_config.ocr.ocr_lang,
+            quality_mode=job_config.ocr.quality_mode,
+            fast_mode=job_config.ocr.fast_mode,
+            fast_confidence_skip=job_config.ocr.fast_confidence_skip,
+            tessdata_dir=job_config.ocr.tessdata_dir,
+            persist_renders=job_config.render.persist_renders,
+            pdf_bytes_cache_mb=job_config.render.pdf_bytes_cache_mb,
+            zoom=job_config.render.zoom,
+            high_dpi_zoom=job_config.render.high_dpi_zoom,
+            high_dpi_retry_conf=job_config.render.high_dpi_retry_conf,
+            header_footer_crop_pct=job_config.preprocess.header_footer_crop_pct,
+            watermark_flatten=job_config.preprocess.watermark_flatten,
+            watermark_clip_threshold=job_config.preprocess.watermark_clip_threshold,
+            watermark_retry_conf=job_config.preprocess.watermark_retry_conf,
+            quantize_levels=job_config.preprocess.quantize_levels,
+            quantize_dither=job_config.preprocess.quantize_dither,
+            third_pass_scale=job_config.preprocess.third_pass_scale,
+            text_layer_first=job_config.text_layer.text_layer_first,
+            text_layer_lang_min_ratio=job_config.text_layer.text_layer_lang_min_ratio,
+            text_layer_min_ben_chars=job_config.text_layer.text_layer_min_ben_chars,
+            max_workers=job_config.max_workers,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
+            auto_append_eng_for_ben=job_config.ocr.auto_append_eng_for_ben,
+            segment_retry_conf=job_config.ocr.segment_retry_conf,
+            easyocr_fallback_conf=job_config.ocr.easyocr_fallback_conf,
+            easyocr_primary_conf=job_config.ocr.easyocr_primary_conf,
+            tesseract_refine_min_chars=job_config.ocr.tesseract_refine_min_chars,
+            # Reed-Solomon error correction parameters
+            rs_enabled=job_config.rs_correction.enabled,
+            rs_error_correction_bytes=job_config.rs_correction.error_correction_bytes,
+            rs_block_size=job_config.rs_correction.block_size,
+            rs_enable_correction=job_config.rs_correction.enable_correction,
+            rs_verify_only=job_config.rs_correction.verify_only,
+        )
+
+    def _build_ocr_pipeline(self):
+        return OcrPipeline(
+            ocr_method=self.ocr_method,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            fast_mode=self.fast_mode,
+            fast_conf_skip=self.fast_conf_skip,
+            tessdata_dir=self.tessdata_dir,
+            log=self.log,
+            log_error=self.log_error,
+            header_footer_crop_pct=self.header_footer_crop_pct,
+            watermark_flatten=self.watermark_flatten,
+            watermark_clip_threshold=self.watermark_clip_threshold,
+            auto_append_eng_for_ben=self.auto_append_eng_for_ben,
+            segment_retry_conf=self.segment_retry_conf,
+            easyocr_fallback_conf=self.easyocr_fallback_conf,
+            easyocr_primary_conf=self.easyocr_primary_conf,
+            tesseract_refine_min_chars=self.tesseract_refine_min_chars,
+        )
+
+    def _get_ocr_pipeline(self):
+        if self.share_ocr_instances and self.ocr:
+            return self.ocr
+        return self._ocr_factory()
+    
+    def setup_directories(self):
+        """Create all necessary directories upfront."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.renders_dir = os.path.join(self.output_dir, 'renders')
+            os.makedirs(self.renders_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    def _worker_count(self):
+        """Optimized worker pool size for parallel OCR processing."""
+        try:
+            if getattr(self, "max_workers_override", None) is not None:
+                override = self.max_workers_override
+                if isinstance(override, (int, float)) and not isinstance(override, bool):
+                    return max(1, int(override))
+                elif isinstance(override, str) and override.strip().isdigit():
+                    return max(1, int(override.strip()))
+            cores = os.cpu_count() or 2
+            langs = split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
+            has_ben = "ben" in langs
+            if has_ben:
+                max_workers = max(2, min(cores - 1, 4))
+            else:
+                max_workers = max(2, min(cores, 8))
+            if self.quality_mode if hasattr(self, 'quality_mode') else False:
+                max_workers = max(2, max_workers // 2)
+            return max_workers
+        except Exception:
+            return 2
+
+    def _ensure_tesseract_cmd(self):
+        """Make sure pytesseract points to a real tesseract binary."""
+        try:
+            resolved = resolve_tesseract_cmd()
+            if resolved and self.log:
+                self.log(f"tesseract_cmd resolved to {resolved}")
+        except Exception:
+            pass
+
+    def _verify_language_file(self):
+        """Ensure the requested language data exists; log a clear error if not."""
+        if not self.tessdata_dir:
+            self.log("Warning: tessdata directory not found; set TESSDATA_PREFIX or pass tessdata_dir")
+            return
+
+        langs = split_langs(self.ocr_lang) or ["ben"]
+        missing = []
+        for code in langs:
+            lang_file = Path(self.tessdata_dir) / f"{code}.traineddata"
+            if not lang_file.is_file():
+                missing.append(str(lang_file))
+
+        if missing:
+            self.log_error(f"Missing language file(s): {', '.join(missing)}")
+            self.log("Tesseract language data not found; install the file or update tessdata path")
+            return
+
+        os.environ["TESSDATA_PREFIX"] = sanitize_tessdata_prefix(self.tessdata_dir) or self.tessdata_dir
+        self.log(f"Using tessdata: {self.tessdata_dir}; languages: {', '.join(langs)}")
+
+        try:
+            cmd_obj = getattr(pytesseract, 'pytesseract', None)
+            cmd_path = getattr(cmd_obj, 'tesseract_cmd', None) if cmd_obj else None
+            self.log(f"tesseract_cmd: {cmd_path}")
+        except Exception:
+            pass
+
+    def cleanup_renders(self):
+        """Delete renders directory after processing to save space."""
+        try:
+            self.renderer.cleanup_renders()
+        except Exception:
+            pass
+    
+    def log(self, message):
+        """Log message."""
+        self.results['extraction_log'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        if self.progress_callback:
+            self.progress_callback(message)
+        if hasattr(self, 'logger') and self.logger:
+            try:
+                self.logger.info(message)
+            except Exception:
+                pass
+
+    def log_error(self, message):
+        """Persist errors to errors.log so they remain visible after the UI advances."""
+        try:
+            path = os.path.join(self.output_dir, "errors.log")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {message}\n")
+        except Exception:
+            pass
+        if hasattr(self, 'logger') and self.logger:
+            try:
+                self.logger.error(message)
+            except Exception:
+                pass
+    
+    def open_pdf(self):
+        """Open PDF document."""
+        ok = self.renderer.open_pdf()
+        if not ok:
+            return False
+        self.doc = self.renderer.doc
+        try:
+            page_count = len(self.doc.pages) if self.doc and hasattr(self.doc, 'pages') else 0
+            size_mb = round(os.path.getsize(self.pdf_path) / (1024 * 1024), 2)
+        except Exception:
+            page_count = 0
+            size_mb = 0
+        self.results['metadata'] = {
+            'filename': Path(self.pdf_path).name,
+            'pages': page_count,
+            'creation_date': datetime.now().isoformat(),
+            'file_size_mb': size_mb
+        }
+        self.log(f"Opened: {self.results['metadata']['filename']}")
+        return True
+    
+    def preprocess_image_for_ocr(self, image_path):
+        """Optimized preprocessing with advanced quantization for Bengali/English text."""
+        return preproc.preprocess_image_for_ocr(
+            image_path,
+            ocr_lang=self.ocr_lang,
+            fast_mode=self.fast_mode,
+            quality_mode=self.quality_mode,
+            log_fn=self.log,
+        )
+
+    def render_page_to_image(self, page_num, zoom=None):
+        """Render a single page using pdf2image/Poppler; returns (PIL image, saved_path|None)."""
+        return self.renderer.render_page(page_num, zoom or self.page_render_zoom, fmt="png")
+
+    @timer("page_processing")
+    def _process_page_with_ocr(self, page_num):
+        """Optimized page processing with intelligent retry logic and error recovery."""
+        if self.stop_event and self.stop_event.is_set():
+            return page_num, None
+
+        render_img = None
+        render_path = None
+        page_level_ocr = None
+        ocr_engine = self._get_ocr_pipeline()
+        
+        try:
+            render_result = self.render_page_to_image(page_num)
+            if not render_result:
+                return page_num, PageResult(
+                    page_number=page_num,
+                    content="",
+                    warning='Rendering unavailable; raster OCR skipped',
+                )
+            if isinstance(render_result, tuple):
+                render_img, render_path = render_result
+            else:
+                render_img = render_result
+                render_path = None
+            
+            page_level_ocr = ocr_engine.extract_text_with_ocr(render_img)
+            
+            if page_level_ocr:
+                confidence = page_level_ocr.get('avg_confidence', 0)
+                text_length = len(page_level_ocr.get('text', '').strip())
+                needs_retry = (
+                    confidence < self.high_dpi_retry_conf or
+                    (text_length < 50 and confidence < 0.9)
+                )
+                
+                if needs_retry and not self.fast_mode:
+                    try:
+                        hi_render = self.render_page_to_image(page_num, zoom=self.high_dpi_zoom)
+                        if hi_render:
+                            if isinstance(hi_render, tuple):
+                                hi_img, hi_path = hi_render
+                            else:
+                                hi_img, hi_path = hi_render, None
+
+                            hi_ocr = ocr_engine.extract_text_with_ocr(hi_img)
+                            if self._score_result(hi_ocr) > self._score_result(page_level_ocr):
+                                page_level_ocr = hi_ocr
+                                render_img = hi_img
+                                render_path = hi_path
+                                self.log(f"[Page {page_num + 1}] High-DPI retry improved results")
+                            if hi_path and hi_path != render_path and os.path.exists(hi_path):
+                                try:
+                                    os.remove(hi_path)
+                                except Exception:
+                                    pass
+                    except Exception as retry_err:
+                        self.log(f"[Page {page_num + 1}] High-DPI retry failed: {retry_err}")
+
+            page_text = page_level_ocr['text'] if page_level_ocr else ""
+            page_data = PageResult(
+                page_number=page_num,
+                content=page_text,
+                ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+            )
+
+            return page_num, page_data
+            
+        except Exception as e:
+            error_msg = f"Page {page_num + 1} processing error: {e}"
+            self.log(error_msg)
+            self.log_error(error_msg)
+            
+            return page_num, PageResult(
+                page_number=page_num,
+                content="",
+                error=str(e),
+            )
+
+    def _normalize_text(self, text):
+        """Strip zero-width characters and normalize whitespace."""
+        return normalize_text(text)
+
+    def _bangla_ratio(self, text: str):
+        """Return (ratio, count) of Bangla characters in the text."""
+        return bangla_ratio(text)
+
+    def _flatten_background(self, image, clip=None):
+        clip_val = self.watermark_clip_threshold if clip is None else clip
+        return preproc.flatten_background(image, clip=clip_val)
+
+    def _choose_psm(self, image, segment_count):
+        return preproc.choose_psm(image, segment_count)
+
+    def _extract_text_layer(self, page):
+        """Fast path: pull native text from the PDF; returns normalized string or ''."""
+        try:
+            raw = page.extract_text() or ""
+            normalized = normalize_text(raw)
+            return normalized
+        except Exception:
+            return ""
+
+    def _score_result(self, res):
+        """Enhanced scoring algorithm for OCR result comparison."""
+        return ocr_t.score_result(res)
+
+    def _run_tesseract_pass(self, image, extra_config=None, extra_dilate=False, psm=None):
+        """Run one Tesseract pass on a PIL image with optional extra dilation and config."""
+        return ocr_t.run_tesseract_pass(
+            image,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            psm=psm,
+            extra_config=extra_config,
+            extra_dilate=extra_dilate,
+            log=self.log,
+            log_error=self.log_error,
+        )
+    
+    def _get_easyocr_reader(self):
+        """Delegate to OCR pipeline's _get_easyocr_reader method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._get_easyocr_reader()
+    
+    def _run_easyocr_pass(self, image):
+        """Delegate to OCR pipeline's _run_easyocr_pass method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._run_easyocr_pass(image)
+
+    @timer("page_processing")
+    def scrape_all_pages(self):
+        """Scrape all pages with optional parallel OCR per page."""
+        if not self.open_pdf():
+            return False
+        
+        try:
+            if not self.doc or not hasattr(self.doc, 'pages'):
+                return False
+                
+            total_pages = len(self.doc.pages)
+            page_results = {}
+            ocr_futures = []
+
+            with ThreadPoolExecutor(max_workers=self._worker_count()) as executor:
+                for page_num in range(total_pages):
+                    if self.stop_event and self.stop_event.is_set():
+                        self.log("Stop requested; aborting remaining pages")
+                        break
+
+                    # Calculate and report progress
+                    progress = ((page_num + 1) / total_pages) * 100
+                    if self.progress_callback:
+                        try:
+                            self.progress_callback(progress)
+                        except Exception as e:
+                            self.log(f"Error in progress callback: {str(e)}")
+                    page_text = ""
+                    page_level_ocr = None
+                    render_path = None
+
+                    try:
+                        page = self.doc.pages[page_num]
+
+                        if self.text_layer_first:
+                            langs = split_langs(self.ocr_lang) or []
+                            text_layer = self._extract_text_layer(page)
+                            if text_layer and len(text_layer) > 5:
+                                use_text_layer = False
+                                if "ben" in langs:
+                                    ratio, ben_count = self._bangla_ratio(text_layer)
+                                    use_text_layer = (
+                                        ratio >= self.text_layer_lang_min_ratio
+                                        and ben_count >= self.text_layer_min_ben_chars
+                                    )
+                                    if not use_text_layer:
+                                        self.log(
+                                            f"[Page {page_num + 1}] Text layer rejected (ben ratio {ratio:.2f}, chars {ben_count}); running OCR"
+                                        )
+                                else:
+                                    use_text_layer = True
+
+                                if use_text_layer:
+                                    page_text = text_layer
+                                    self.log(f"[Page {page_num + 1}] Used PDF text layer; OCR skipped")
+
+                        if not page_text:
+                            future = executor.submit(self._process_page_with_ocr, page_num)
+                            ocr_futures.append(future)
+                            continue
+
+                    except Exception as page_err:
+                        self.log(f"Page {page_num + 1} OCR error: {page_err}")
+                        try:
+                            print(f"Page {page_num + 1} OCR error: {page_err}", file=sys.stderr)
+                        except Exception:
+                            pass
+                        try:
+                            self.log_error(f"Page {page_num + 1} OCR error: {page_err}")
+                        except Exception:
+                            pass
+                        page_text = ""
+                        page_level_ocr = None
+
+                    preview_len = len(page_text)
+                    self.log(f"[Page {page_num + 1}] OCR complete (chars: {preview_len})")
+
+                    page_results[page_num] = PageResult(
+                        page_number=page_num,
+                        content=page_text,
+                        ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                        ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                        ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                        ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+                    )
+
+                for fut in as_completed(ocr_futures):
+                    try:
+                        page_num, page_data = fut.result()
+                    except Exception as err:
+                        self.log(f"Parallel OCR error: {err}")
+                        continue
+                    if page_data is None:
+                        continue
+                    page_results[page_num] = page_data
+
+            for page_num in sorted(page_results.keys()):
+                page_data = page_results[page_num]
+                # Convert PageResult to dictionary using asdict to ensure all fields are in sync
+                page_dict = asdict(page_data)
+                # Set ocr_render to None if falsy (empty string) for consistency
+                if not page_dict.get('ocr_render'):
+                    page_dict['ocr_render'] = None
+                self.results['pages'][f'page_{page_num}'] = page_dict
+                preview_len = len(page_data.content or '')
+                self.log(f"[Page {page_num + 1}] OCR merged (chars: {preview_len})")
+            
+            total_page_ocr = sum(len(p.get('ocr_page_text', '')) for p in self.results['pages'].values())
+            pages_with_ocr = sum(1 for p in self.results['pages'].values() if p.get('ocr_page_text'))
+            
+            self.results['statistics'] = {
+                'total_pages': total_pages,
+                'total_text_length': sum(len(p.get('content', '')) for p in self.results['pages'].values()),
+                'ocr_enabled': self.use_ocr,
+                'pages_with_ocr_text': pages_with_ocr,
+                'total_ocr_characters': total_page_ocr,
+                'ocr_method': (getattr(self.ocr, 'ocr_method_effective', None) or self.ocr_method) if self.use_ocr else None,
+                'preprocessing_applied': True,
+            }
+            
+            return True
+        except Exception as e:
+            self.log(f"Error: {str(e)}")
+            try:
+                self.log_error(f"Scrape failure: {e}")
+            except Exception:
+                pass
+            return False
+        finally:
+            try:
+                self.renderer.close()
+            except Exception:
+                pass
+            self.doc = None
+    
+    def save_results(self):
+        """Save results with layout-preserving output formats."""
+        try:
+            metadata = self.results.get('metadata') or {}
+            if 'filename' not in metadata:
+                metadata['filename'] = Path(self.pdf_path).name
+            if 'pages' not in metadata:
+                metadata['pages'] = len(self.results.get('pages', {}))
+            if 'creation_date' not in metadata:
+                metadata['creation_date'] = datetime.now().isoformat()
+            if 'file_size_mb' not in metadata:
+                if os.path.exists(self.pdf_path):
+                    metadata['file_size_mb'] = round(os.path.getsize(self.pdf_path) / (1024 * 1024), 2)
+                else:
+                    metadata['file_size_mb'] = 0.0
+            self.results['metadata'] = metadata
+            display_lang = getattr(self, "user_lang", None) or self.ocr_lang
+
+            ordered_pages = sorted(
+                self.results['pages'].values(),
+                key=lambda p: p.get('page_number', 0)
+            )
+
+            # Write text files - with or without Reed-Solomon correction
+            # Collect all page texts first
+            page_texts = []
+            for page_data in ordered_pages:
+                page_texts.append(page_data.get('content', '') or '')
+            
+            if self.rs_enabled and self.rs_corrector:
+                # Write RS-encoded binary files
+                # Encode and save each type of output
+                self._save_rs_encoded_text('extracted_text.txt', page_texts, ordered_pages, display_lang)
+                self._save_rs_encoded_text('extracted_text_continuous.txt', page_texts, ordered_pages, display_lang, continuous=True)
+                self._save_rs_encoded_text('extracted_text_structured.txt', page_texts, ordered_pages, display_lang, structured=True)
+                self._save_rs_encoded_sentences('extracted_text_sentences.txt', page_texts, ordered_pages, display_lang)
+                
+                # Also save plain text files for compatibility
+                self._save_plain_text_files(page_texts, ordered_pages, display_lang)
+            else:
+                # Write plain text files
+                self._save_plain_text_files(page_texts, ordered_pages, display_lang)
+                
+            # Save extraction report (this should be outside RS-specific logic)
+            # Save extraction report
+            with open(os.path.join(self.output_dir, 'extraction_report.txt'), 'w', encoding='utf-8') as f:
+                stats = self.results.get('statistics', {})
+                f.write(f"PDF EXTRACTION REPORT\n")
+                f.write(f"{'=' * 50}\n\n")
+                f.write(f"File: {metadata.get('filename', 'Unknown')}\n")
+                f.write(f"Size: {metadata.get('file_size_mb', 0):.2f} MB\n")
+                f.write(f"Total Pages: {stats.get('total_pages', 0)}\n")
+                f.write(f"Pages with OCR: {stats.get('pages_with_ocr_text', 0)}\n")
+                f.write(f"Total Characters: {stats.get('total_ocr_characters', 0):,}\n")
+                f.write(f"OCR Engine: {stats.get('ocr_method', 'Unknown')}\n")
+                f.write(f"Language: {display_lang}\n")
+                f.write(f"Quality Mode: {'Yes' if self.quality_mode else 'No'}\n")
+                f.write(f"Processing Time: {metadata.get('creation_date', '')}\n\n")
+                
+                f.write("PAGE QUALITY METRICS\n")
+                f.write("-" * 30 + "\n")
+                for page_data in ordered_pages:
+                    page_num = page_data['page_number'] + 1
+                    confidence = page_data.get('ocr_page_confidence', 0)
+                    char_count = len(page_data.get('content', ''))
+                    fragments = page_data.get('ocr_page_fragments', 0)
+                    status = "Good" if confidence > 0.8 else "Fair" if confidence > 0.6 else "Poor"
+                    f.write(f"Page {page_num:3d}: {confidence:.3f} confidence, {char_count:4d} chars, {fragments:2d} fragments [{status}]\n")
+
+            self.log("Saved: extracted_text.txt (standard)")
+            self.log("Saved: extracted_text_continuous.txt (layout-preserving)")
+            self.log("Saved: extracted_text_structured.txt (detailed)")
+            self.log("Saved: extracted_text_sentences.txt (sentences/clauses)")
+            self.log("Saved: extraction_report.txt (quality metrics)")
+            return True
+            
+        except Exception as e:
+            self.log(f"Save error: {str(e)}")
+            self.log_error(f"Save error: {e}")
+            return False
+
+    def _save_plain_text_files(self, page_texts, ordered_pages, display_lang):
+        """Save plain text files without Reed-Solomon correction."""
+        metadata = self.results['metadata']
+        
+        with open(os.path.join(self.output_dir, 'extracted_text.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"File: {self.results['metadata']['filename']}\n")
+            f.write(f"Pages: {len(self.results['pages'])}\n")
+            f.write(f"OCR: {self.ocr_method}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write("=" * 80 + "\n")
+
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                f.write(f"\n----- PAGE {page_num + 1} -----\n")
+                content = page_data.get('content', '') or ''
+                f.write(content)
+                f.write("\n")
+
+        with open(os.path.join(self.output_dir, 'extracted_text_continuous.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"# {self.results['metadata']['filename']}\n")
+            f.write(f"# Extracted: {metadata.get('creation_date', '')[:19]}\n")
+            f.write(f"# Language: {display_lang} | Pages: {len(self.results['pages'])}\n\n")
+            for i, page_data in enumerate(ordered_pages):
+                content = page_data.get('content', '') or ''
+                if content.strip():
+                    if i > 0:
+                        f.write('\n\n')
+                    f.write(content.strip())
+
+        with open(os.path.join(self.output_dir, 'extracted_text_structured.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"Document: {self.results['metadata']['filename']}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write(f"Total Pages: {len(self.results['pages'])}\n")
+            f.write(f"Processing Date: {metadata.get('creation_date', '')[:19]}\n")
+            f.write("\n" + "=" * 100 + "\n\n")
+            
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                content = page_data.get('content', '') or ''
+                confidence = page_data.get('ocr_page_confidence', 0)
+                fragments = page_data.get('ocr_page_fragments', 0)
+                
+                f.write(f"PAGE {page_num + 1}")
+                if confidence > 0:
+                    f.write(f" [Confidence: {confidence:.3f}, Fragments: {fragments}]")
+                f.write(f"\n{'-' * 50}\n")
+                
+                if content.strip():
+                    f.write(content)
+                    f.write("\n\n")
+                else:
+                    f.write("[No text detected on this page]\n\n")
+
+        sentences_out = os.path.join(self.output_dir, 'extracted_text_sentences.txt')
+        with open(sentences_out, 'w', encoding='utf-8') as f:
+            f.write(f"Document: {self.results['metadata']['filename']}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write(f"Sentences/Clauses\n")
+            f.write(f"{'-' * 40}\n")
+            all_sentences = []
+            for page_data in ordered_pages:
+                content = page_data.get('content', '') or ''
+                all_sentences.extend(_sentence_chunks(content))
+            for sent in all_sentences:
+                f.write(sent + "\n")
+
+    def _save_rs_encoded_text(self, filename, page_texts, ordered_pages, display_lang, continuous=False, structured=False):
+        """Save RS-encoded text files."""
+        rs_filename = os.path.splitext(filename)[0] + '.rs'
+        output_path = os.path.join(self.output_dir, rs_filename)
+        
+        text_to_encode = ""
+        metadata = self.results['metadata']
+        
+        if continuous:
+            text_to_encode = f"# {metadata['filename']}\n"
+            text_to_encode += f"# Extracted: {metadata.get('creation_date', '')[:19]}\n"
+            text_to_encode += f"# Language: {display_lang} | Pages: {len(ordered_pages)}\n\n"
+            for i, page_data in enumerate(ordered_pages):
+                content = page_data.get('content', '') or ''
+                if content.strip():
+                    if i > 0:
+                        text_to_encode += '\n\n'
+                    text_to_encode += content.strip()
+        elif structured:
+            text_to_encode = f"Document: {metadata['filename']}\n"
+            text_to_encode += f"Language: {display_lang}\n"
+            text_to_encode += f"Total Pages: {len(ordered_pages)}\n"
+            text_to_encode += f"Processing Date: {metadata.get('creation_date', '')[:19]}\n"
+            text_to_encode += "\n" + "=" * 100 + "\n\n"
+            
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                content = page_data.get('content', '') or ''
+                confidence = page_data.get('ocr_page_confidence', 0)
+                fragments = page_data.get('ocr_page_fragments', 0)
+                
+                text_to_encode += f"PAGE {page_num + 1}"
+                if confidence > 0:
+                    text_to_encode += f" [Confidence: {confidence:.3f}, Fragments: {fragments}]"
+                text_to_encode += f"\n{'-' * 50}\n"
+                
+                if content.strip():
+                    text_to_encode += content
+                    text_to_encode += "\n\n"
+                else:
+                    text_to_encode += "[No text detected on this page]\n\n"
+        else:
+            text_to_encode = f"File: {metadata['filename']}\n"
+            text_to_encode += f"Pages: {len(ordered_pages)}\n"
+            text_to_encode += f"OCR: {self.ocr_method}\n"
+            text_to_encode += f"Language: {display_lang}\n"
+            text_to_encode += "=" * 80 + "\n"
+
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                text_to_encode += f"\n----- PAGE {page_num + 1} -----\n"
+                content = page_data.get('content', '') or ''
+                text_to_encode += content
+                text_to_encode += "\n"
+        
+        try:
+            self.rs_corrector.encode_and_save(text_to_encode, output_path)
+            self.log(f"Saved: {rs_filename} (RS-encoded)")
+        except Exception as e:
+            self.log_error(f"Error saving RS-encoded file {rs_filename}: {e}")
+
+    def _save_rs_encoded_sentences(self, filename, page_texts, ordered_pages, display_lang):
+        """Save RS-encoded sentences file."""
+        rs_filename = os.path.splitext(filename)[0] + '.rs'
+        output_path = os.path.join(self.output_dir, rs_filename)
+        
+        text_to_encode = f"Document: {self.results['metadata']['filename']}\n"
+        text_to_encode += f"Language: {display_lang}\n"
+        text_to_encode += f"Sentences/Clauses\n"
+        text_to_encode += f"{'-' * 40}\n"
+        
+        all_sentences = []
+        for page_data in ordered_pages:
+            content = page_data.get('content', '') or ''
+            all_sentences.extend(_sentence_chunks(content))
+        for sent in all_sentences:
+            text_to_encode += sent + "\n"
+        
+        try:
+            self.rs_corrector.encode_and_save(text_to_encode, output_path)
+            self.log(f"Saved: {rs_filename} (RS-encoded)")
+        except Exception as e:
+            self.log_error(f"Error saving RS-encoded sentences file {rs_filename}: {e}")
+
+    def _decode_rs_text_file(self, rs_filename):
+        """Decode and verify an RS-encoded text file."""
+        try:
+            text, errors_corrected, _ = self.rs_corrector.load_and_decode(rs_filename)
+            if errors_corrected:
+                self.log(f"Corrected {errors_corrected} errors in {rs_filename}")
+            return text
+        except Exception as e:
+            self.log_error(f"Error decoding RS file {rs_filename}: {e}")
+            return None
+
+    def _verify_rs_text_files(self):
+        """Verify all RS-encoded files in output directory."""
+        if not self.rs_enabled or not self.rs_corrector:
+            return
+        
+        self.log("Verifying RS-encoded files...")
+        rs_files = [f for f in os.listdir(self.output_dir) if f.endswith('.rs')]
+        
+        for rs_file in rs_files:
+            rs_path = os.path.join(self.output_dir, rs_file)
+            try:
+                with open(rs_path, 'rb') as f:
+                    encoded_bytes = f.read()
+                
+                is_intact, errors = self.rs_corrector.verify_text(encoded_bytes)
+                if is_intact:
+                    self.log(f"✓ {rs_file}: OK")
+                else:
+                    self.log(f"⚠ {rs_file}: {errors} errors detected")
+                    if self.rs_enable_correction and not self.rs_verify_only:
+                        self.log(f"   Attempting correction...")
+                        text, errors_corrected, _ = self.rs_corrector.decode_text(encoded_bytes)
+                        self.log(f"   Corrected {errors_corrected} errors")
+            except Exception as e:
+                self.log_error(f"Error verifying {rs_file}: {e}")
+
+
+from typing import Callable, Optional, TypedDict, Dict, Any
+
+class JobResult(TypedDict):
+    scrape_ok: bool
+    save_ok: bool
+    stats: Dict[str, Any]
+    output_dir: str
+
+def run_pdf_job(job_config: JobConfig, stop_event: Optional[object], log_cb: Optional[Callable[[str], None]]) -> JobResult:
+    """Run a single PDF job using the provided configuration."""
+    errors, warnings = validate_runtime_env()
+    if errors:
+        if log_cb:
+            for err in errors:
+                log_cb(err)
+        return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": job_config.output_root}
+    if log_cb:
+        for w in warnings:
+            log_cb(f"Warning: {w}")
+
+    pdf_name = Path(job_config.input_path).stem
+    pdf_output = os.path.join(job_config.output_root, pdf_name)
+    scraper = None
+    try:
+        scraper = PDFScraper.from_job_config(job_config, progress_callback=log_cb, stop_event=stop_event)
+        if log_cb:
+            log_cb("Scraping PDF...")
+        scrape_ok = scraper.scrape_all_pages()
+        if log_cb:
+            log_cb("Saving results..." if scrape_ok else "Saving partial results...")
+        save_ok = scraper.save_results()
+        try:
+            scraper.cleanup_renders()
+        except Exception:
+            pass
+        stats = scraper.results.get('statistics', {})
+        return {
+            "scrape_ok": scrape_ok,
+            "save_ok": save_ok,
+            "stats": stats,
+            "output_dir": pdf_output,
+        }
+    except Exception as e:
+        if log_cb:
+            log_cb(f"Error: {e}")
+        if scraper:
+            scraper.log_error(f"Batch error on {job_config.input_path}: {e}")
+        else:
+            os.makedirs(pdf_output, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(os.path.join(pdf_output, "errors.log"), "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] Batch error on {job_config.input_path}: {e}\n")
+        return {"scrape_ok": False, "save_ok": False, "stats": {}, "output_dir": pdf_output}

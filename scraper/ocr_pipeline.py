@@ -75,7 +75,8 @@ class OcrPipeline:
                      - Logging callbacks are provided via the `log` and `log_error` parameters (not documented here).
                      - The constructor performs initial environment validation (Tesseract command resolution and language data verification) and prepares internal state for lazy engine initialization.
                  """
-                 self.ocr_method = ocr_method
+        self.ocr_method = ocr_method
+        self.ocr_method_effective = ocr_method
         self.ocr_lang = ocr_lang
         self.quality_mode = quality_mode
         self.fast_mode = fast_mode
@@ -186,9 +187,7 @@ class OcrPipeline:
 
     def _is_noise_fragment(self, text: str, confidence: float) -> bool:
         """
-        Determine whether an OCR text fragment is likely to be noise.
-        
-        Uses simple heuristics based on trimmed text length and confidence to flag fragments that are empty, very short, or both short and low-confidence.
+        Determine whether an OCR text fragment is likely to be noise, with enhanced Bengali-specific heuristics.
         
         Parameters:
             text (str): The OCR-extracted text fragment.
@@ -199,14 +198,21 @@ class OcrPipeline:
         """
         if not text:
             return True
-            
-        text_len = len(text.strip())
-        if text_len < 2:
+        if not self.ocr_lang.startswith('ben'):
+            return False
+        tokens = re.sub(r"[\s\W_]+", "", text)
+        if not tokens:
             return True
-            
-        if confidence < 0.2 and text_len < 5:
+        ascii_letters = sum(1 for ch in tokens if ch.isascii())
+        bengali_letters = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
+        length = len(tokens)
+        if length <= 4 and confidence < 0.96:
             return True
-            
+        if bengali_letters == 0 and ascii_letters >= 3 and confidence < 0.93:
+            return True
+        ascii_ratio = ascii_letters / max(length, 1)
+        if ascii_ratio > 0.65 and confidence < 0.9:
+            return True
         return False
 
     def _load_image(self, image_or_path):
@@ -355,80 +361,221 @@ class OcrPipeline:
 
     @timer("easyocr_pass")
     def extract_text_with_easyocr_primary(self, image_path_or_image):
-        """
-        Run a primary EasyOCR pass on the provided image.
-        
-        Parameters:
-            image_path_or_image (str | PIL.Image.Image): File path or PIL Image to process.
-        
-        Returns:
-            dict: OCR result dictionary annotated with `'method': 'easyocr_primary'` on success.
-            None if EasyOCR is unavailable, the image cannot be loaded, or the OCR pass fails.
-        """
         if not EASYOCR_AVAILABLE:
-            return None
-            
-        img = self._load_image(image_path_or_image)
-        if img is None:
-            return None
-            
+            if self.log:
+                self.log("EasyOCR not installed; falling back to Tesseract")
+            return self.extract_text_with_tesseract(image_path_or_image)
         try:
-            result = self._run_easyocr_pass(img)
-            
-            if result:
-                result['method'] = 'easyocr_primary'
-                
-            return result
-            
+            raw_img = self._load_image(image_path_or_image)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
+            preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
+
+            base_segments_preview = self._maybe_split_columns(preprocessed_img)
+            psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
+            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
+            segments = [(seg, idx) for idx, seg in enumerate(base_segments_preview)]
+
+            combined_text = []
+            total_conf_weighted = 0.0
+            total_fragments = 0
+            refined = False
+
+            if self.ocr_lang.startswith('ben'):
+                try:
+                    preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
+                except Exception:
+                    pass
+                if flattened_img is not None:
+                    try:
+                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
+                    except Exception:
+                        pass
+
+            for seg, idx in segments:
+                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
+                easy_res = self._run_easyocr_pass(seg)
+                alt_easy = self._run_easyocr_pass(alt_seg) if alt_seg is not None else None
+                best = easy_res
+                if self._score_result(alt_easy) > self._score_result(best):
+                    best = alt_easy
+
+                needs_refine = False
+                if TESSERACT_AVAILABLE:
+                    if not best:
+                        needs_refine = True
+                    else:
+                        text_len = len(best.get('text', '').strip())
+                        conf = best.get('avg_confidence', 0)
+                        if conf < self.easyocr_primary_conf or text_len < self.tesseract_refine_min_chars:
+                            needs_refine = True
+
+                if needs_refine:
+                    self._verify_language_file()
+                    tess_best = self._tesseract_best_for_segment(seg, alt_seg, psm_for_seg)
+                    if self._score_result(tess_best) > self._score_result(best):
+                        best = tess_best
+                        refined = True
+
+                if best:
+                    conf_val = best.get('avg_confidence') or 0
+                    text_val = best.get('text', '')
+                    if self._is_noise_fragment(text_val, conf_val):
+                        continue
+                    combined_text.append(text_val)
+                    total_conf_weighted += conf_val * max(best.get('fragments', 1), 1)
+                    total_fragments += max(best.get('fragments', 1), 1)
+
+            if not combined_text:
+                return None
+
+            normalized = self._normalize_text('\n\n'.join(combined_text))
+            avg_conf = (total_conf_weighted / total_fragments) if total_fragments else 0.0
+            self.ocr_method_effective = "easyocr+tesseract" if refined and TESSERACT_AVAILABLE else "easyocr"
+            return {
+                'text': normalized,
+                'avg_confidence': round(avg_conf, 4),
+                'fragments': total_fragments,
+                'method': self.ocr_method_effective
+            }
         except Exception as e:
-            self.log_error(f"EasyOCR primary pass failed: {e}")
+            if self.log:
+                self.log(f"EasyOCR-first error: {str(e)}")
+            if self.log_error:
+                self.log_error(f"EasyOCR-first error: {e}")
             return None
 
     @timer("tesseract_pass")
     def extract_text_with_tesseract(self, image_path_or_image):
-        """
-        Run a Tesseract OCR pass on the given image and return the OCR result.
-        
-        Parameters:
-            image_path_or_image (str | PIL.Image.Image): File path or PIL Image to process.
-        
-        Returns:
-            result: The OCR result object from the Tesseract pass, or `None` if Tesseract is unavailable, the image could not be loaded, or an error occurred during processing.
-        """
         if not TESSERACT_AVAILABLE:
+            if self.log:
+                self.log("Tesseract not installed. Install tesseract-ocr and pytesseract")
             return None
-            
-        img = self._load_image(image_path_or_image)
-        if img is None:
-            return None
-            
+        self._verify_language_file()
         try:
-            return self._run_tesseract_pass(img)
+            raw_img = self._load_image(image_path_or_image)
+            cropped_img = preproc.crop_header_footer(raw_img, pct=self.header_footer_crop_pct)
+            if cropped_img is None:
+                return None
+            preprocessed_img = self.preprocess_image_for_ocr(cropped_img)
+            if preprocessed_img is None:
+                return None
+
+            base_segments_preview = self._maybe_split_columns(preprocessed_img)
+            psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
+            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
+
+            if self.ocr_lang.startswith('ben'):
+                try:
+                    preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
+                except Exception:
+                    pass
+                if flattened_img is not None:
+                    try:
+                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
+                    except Exception:
+                        pass
+
+            base_segments = base_segments_preview
+            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
+            segments = [(seg, idx) for idx, seg in enumerate(base_segments)]
+
+            combined_text = []
+            total_conf_weighted = 0.0
+            total_fragments = 0
+
+            for seg, idx in segments:
+                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
+
+                pass_a = self._run_tesseract_pass(seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
+                pass_b = None
+                if not pass_a or pass_a.get('avg_confidence', 0) < self.fast_conf_skip:
+                    pass_b = self._run_tesseract_pass(seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
+
+                best = pass_a if self._score_result(pass_a) >= self._score_result(pass_b) else pass_b
+
+                if alt_seg is not None and (not best or best.get('avg_confidence', 0) < WATERMARK_RETRY_CONF):
+                    alt_a = self._run_tesseract_pass(alt_seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
+                    alt_b = None
+                    if not alt_a or alt_a.get('avg_confidence', 0) < self.fast_conf_skip:
+                        alt_b = self._run_tesseract_pass(alt_seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
+                    alt_best = alt_a if self._score_result(alt_a) >= self._score_result(alt_b) else alt_b
+                    if self._score_result(alt_best) > self._score_result(best):
+                        best = alt_best
+
+                if best is None or best.get('avg_confidence', 0) < self.segment_retry_conf or best.get('fragments', 0) < 2:
+                    retry_seg = preproc.upscale_for_retry(seg, scale=THIRD_PASS_SCALE)
+                    pass_c = self._run_tesseract_pass(
+                        retry_seg,
+                        extra_config=["-c lstm_choice_mode=2"],
+                        extra_dilate=True,
+                        psm=psm_for_seg,
+                    )
+                    if self._score_result(pass_c) > self._score_result(best):
+                        best = pass_c
+
+                if best is None or best.get('avg_confidence', 0) < self.easyocr_fallback_conf:
+                    easy_res = self._run_easyocr_pass(seg)
+                    if self._score_result(easy_res) > self._score_result(best):
+                        best = easy_res
+
+                if best:
+                    conf_val = best.get('avg_confidence') or 0
+                    text_val = best.get('text', '')
+                    if self._is_noise_fragment(text_val, conf_val):
+                        continue
+                    combined_text.append(text_val)
+                    total_conf_weighted += conf_val * max(best.get('fragments', 1), 1)
+                    total_fragments += max(best.get('fragments', 1), 1)
+
+            if not combined_text:
+                return None
+
+            normalized = self._normalize_text('\n\n'.join(combined_text))
+            avg_conf = (total_conf_weighted / total_fragments) if total_fragments else 0.0
+            return {
+                'text': normalized,
+                'avg_confidence': round(avg_conf, 4),
+                'fragments': total_fragments,
+                'method': 'tesseract'
+            }
         except Exception as e:
-            self.log_error(f"Tesseract pass failed: {e}")
+            if self.log:
+                self.log(f"Tesseract OCR error: {str(e)}")
+            if self.log_error:
+                self.log_error(f"Tesseract OCR error: {e}")
             return None
 
     def extract_text_with_ocr(self, image_path_or_image):
-        """
-        Selects the configured OCR engine and extracts text from the given image.
-        
-        Parameters:
-            image_path_or_image (str | PIL.Image.Image): File path or PIL Image to run OCR on.
-        
-        Returns:
-            result: Engine-specific OCR result object, or `None` if the image could not be loaded or the configured OCR method is unsupported.
-        """
         if not self._engine_logged:
-            self.log(f"OCR engine: {self.ocr_method}")
+            if self.ocr_method == 'tesseract' or not EASYOCR_AVAILABLE:
+                if self.log:
+                    self.log("Engine: Tesseract (EasyOCR unavailable or not selected)")
+            else:
+                if TESSERACT_AVAILABLE:
+                    if self.log:
+                        self.log("Engine: EasyOCR primary; Tesseract will refine weak segments")
+                else:
+                    if self.log:
+                        self.log("Engine: EasyOCR primary; Tesseract unavailable, refinement skipped")
             self._engine_logged = True
-            
-        img = self._load_image(image_path_or_image)
-        if img is None:
-            return None
-            
-        if self.ocr_method == 'easyocr':
-            return self.extract_text_with_easyocr_primary(img)
-        elif self.ocr_method == 'tesseract':
-            return self.extract_text_with_tesseract(img)
-        else:
-            return None
+
+        if self.ocr_method == 'tesseract':
+            self.ocr_method_effective = 'tesseract'
+            return self.extract_text_with_tesseract(image_path_or_image)
+
+        primary = self.extract_text_with_easyocr_primary(image_path_or_image)
+        if primary is not None:
+            return primary
+
+        if TESSERACT_AVAILABLE:
+            self.ocr_method_effective = 'tesseract'
+            return self.extract_text_with_tesseract(image_path_or_image)
+
+        if self.log:
+            self.log("No OCR engine available")
+        return None
