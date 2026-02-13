@@ -170,9 +170,12 @@ class PdfRenderer:
                         self._render_cache[cache_key] = (render_img, render_path)
                         if len(self._render_cache) > self.render_cache_max_items:
                             # Explicitly close the oldest image before removing from cache
-                            old_img, _ = self._render_cache.popitem(last=False)
-                            if hasattr(old_img, 'close'):
-                                old_img.close()
+                            _, old_value = self._render_cache.popitem(last=False)
+                            # Only try to close if we have an actual image (not PENDING)
+                            if isinstance(old_value, tuple) and len(old_value) == 2:
+                                old_img, _ = old_value
+                                if hasattr(old_img, 'close'):
+                                    old_img.close()
                     else:
                         # If another thread already replaced the placeholder,
                         # use that instead of the one we just rendered
