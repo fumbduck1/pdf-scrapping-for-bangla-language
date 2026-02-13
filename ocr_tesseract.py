@@ -11,6 +11,18 @@ from utils import split_langs
 from PIL import ImageFilter
 
 def build_tess_config(ocr_lang: str, quality_mode: bool, extra=None, psm=None):
+    """
+    Constructs a Tesseract command-line configuration string based on requested languages, quality mode, and optional overrides.
+    
+    Parameters:
+        ocr_lang (str): Language code or codes for OCR (e.g., "eng", "ben", or "ben+eng"); empty or None means no language-specific tweaks.
+        quality_mode (bool): When True, enable higher-quality settings (adjusts character blacklist and noise normalization); when False, use faster/looser settings.
+        extra (iterable[str], optional): Additional Tesseract config fragments to append to the generated configuration.
+        psm (int, optional): Page segmentation mode to include; defaults to 6 when not provided.
+    
+    Returns:
+        str: A single command-line configuration string suitable for passing to Tesseract (includes --psm, --oem and language-dependent tuning, with any `extra` items appended).
+    """
     langs = split_langs(ocr_lang) if ocr_lang else []
     has_ben = "ben" in langs
     has_eng = "eng" in langs

@@ -9,7 +9,12 @@ torchvision: Optional[Any] = None
 
 
 def _ensure_torch_imported():
-    """Lazy import torch/torchvision; return True when both modules are present."""
+    """
+    Ensure `torch` and `torchvision` are imported into the module globals if available.
+    
+    Returns:
+        bool: `True` if both `torch` and `torchvision` are present or were successfully imported, `False` otherwise.
+    """
     global torch, torchvision
     if torch is not None and torchvision is not None:
         return True
@@ -32,7 +37,18 @@ class TorchDeviceInfo(TypedDict):
     reason: str
 
 def detect_torch_device() -> TorchDeviceInfo:
-    """Return a dict describing the best-available torch device."""
+    """
+    Detects the best available torch device and returns a mapping describing it.
+    
+    The returned mapping reports whether torch is installed and which compute backend/device is selected, along with a brief reason string explaining the choice or any detection failure.
+    
+    Returns:
+        TorchDeviceInfo: A mapping with the following keys:
+            installed (bool): True if torch was successfully imported, False otherwise.
+            backend (str): Chosen backend name: "cuda", "mps", or "cpu".
+            device (str): Device identifier (e.g., "cuda:0", "mps", "cpu").
+            reason (str): Human-readable explanation of the selected device or why detection failed.
+    """
     info: TorchDeviceInfo = {
         "installed": False,
         "backend": "cpu",
@@ -102,12 +118,27 @@ pdftoppm_available = False
 
 
 def _lazy_import_pdf2image():
-    """Compatibility function for existing code - returns None values."""
+    """
+    Compatibility shim that preserves the pdf2image import API while indicating the library is unavailable.
+    
+    Returns:
+        tuple: A pair of `None` values serving as placeholders for the pdf2image module and its primary import/function.
+    """
     return None, None
 
 
 def check_pdftoppm_available(poppler_path: Optional[str] = None) -> bool:
-    """Check if pdftoppm command is available."""
+    """
+    Determine whether the `pdftoppm` executable is available on the system.
+    
+    If `poppler_path` is provided, the function first checks for `pdftoppm` inside that directory (uses `pdftoppm.exe` on Windows). If not found there, it checks the system PATH.
+    
+    Parameters:
+        poppler_path (Optional[str]): Path to a Poppler binaries directory to check for the `pdftoppm` executable.
+    
+    Returns:
+        bool: `True` if `pdftoppm` is found, `False` otherwise.
+    """
     global pdftoppm_available
     
     import shutil
@@ -131,6 +162,14 @@ def check_pdftoppm_available(poppler_path: Optional[str] = None) -> bool:
 
 
 def _lazy_import_pypdf():
+    """
+    Lazily import pypdf's `PdfReader`, cache it in the module, and update the availability flag.
+    
+    If `pypdf` is importable this sets the module-level `PdfReader` to the imported class and `pypdf_available` to `True`; otherwise sets `PdfReader` to `None` and `pypdf_available` to `False`. The result is cached so subsequent calls return the previously resolved value.
+    
+    Returns:
+        PdfReader or None: The `PdfReader` class from `pypdf` if available, `None` otherwise.
+    """
     global PdfReader, pypdf_available
     if PdfReader is not None:
         pypdf_available = True
@@ -163,6 +202,16 @@ def _lazy_import_numpy():
 
 
 def _lazy_import_easyocr():
+    """
+    Attempt to import and cache the easyocr library.
+    
+    If the import succeeds, stores the module in the module-level variable `easyocr`
+    and sets `easyocr_available` to True. If the import fails, sets `easyocr` to
+    None and `easyocr_available` to False.
+    
+    Returns:
+        The imported `easyocr` module if available, `None` otherwise.
+    """
     global easyocr, easyocr_available
     if easyocr is not None:
         return easyocr
@@ -186,7 +235,11 @@ except ImportError:
 
 
 def _bootstrap_tesseract_default_paths():
-    """Set default tesseract binary if installed in common locations."""
+    """
+    Configure pytesseract's tesseract_cmd to a common system path when the tesseract binary is present.
+    
+    If pytesseract is unavailable or already configured with an existing file path, this function does nothing. Otherwise it checks a small set of platform-appropriate candidate locations and sets `pytesseract.pytesseract.tesseract_cmd` to the first path where a tesseract executable is found.
+    """
     if not tesseract_available or pytesseract is None or not hasattr(pytesseract, "pytesseract"):
         return
     cmd = pytesseract.pytesseract
@@ -224,7 +277,14 @@ def _poppler_bins_exist(path: Path):
 
 
 def detect_poppler_path():
-    """Best-effort detection of poppler binaries across platforms."""
+    """
+    Finds a filesystem path that contains Poppler command-line binaries.
+    
+    Checks the POPPLER_PATH environment variable, common OS-specific installation locations, and entries on the system PATH for directories containing Poppler executables. 
+    
+    Returns:
+        str: Path to a directory containing Poppler binaries (e.g., containing `pdftoppm`/`pdftocairo`), or `None` if no suitable directory is found.
+    """
     env_path = os.environ.get("POPPLER_PATH")
     if env_path:
         env_candidate = Path(env_path)
@@ -270,6 +330,16 @@ epub_lib: Optional[Any] = None
 epublib_available = False
 
 def _lazy_import_epublib():
+    """
+    Attempt to import and cache the EPUB library from ebooklib.epub.
+    
+    If the import succeeds, caches the module in the `epub_lib` global and sets
+    `epublib_available` to True. If the import fails, sets `epub_lib` to None and
+    `epublib_available` to False.
+    
+    Returns:
+        The imported `ebooklib.epub` module if available, `None` otherwise.
+    """
     global epub_lib, epublib_available
     if epub_lib is not None:
         return epub_lib

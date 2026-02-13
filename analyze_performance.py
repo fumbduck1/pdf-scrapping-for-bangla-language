@@ -12,7 +12,14 @@ from performance import get_monitor, print_performance_report
 
 
 def analyze_performance():
-    """Analyze performance bottlenecks on a test PDF"""
+    """
+    Run a performance analysis of OCR and PDF processing on a test PDF and emit reports and optimization suggestions.
+    
+    Performs a configured PDF job, collects timing metrics from the performance monitor, prints execution statistics and a detailed performance report, identifies bottlenecks (e.g., OCR passes, PDF rendering, page processing), and prints targeted optimization suggestions based on observed averages.
+    
+    Returns:
+        True: Indicates the analysis completed.
+    """
     # Test PDF path - replace with your own test file
     test_pdf_path = r"C:\Users\akram\Downloads\sample.pdf"
     output_dir = r"c:\Users\akram\Desktop\pdf scrapper ongoing\performance_analysis"

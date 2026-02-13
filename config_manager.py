@@ -117,7 +117,12 @@ class ConfigManager:
         self._env_vars = self._load_env_vars()
     
     def _load_env_vars(self) -> Dict[str, str]:
-        """Load configuration from environment variables"""
+        """
+        Collect environment variables that start with the PDF_SCRAPER_ prefix and return them keyed by the name with the prefix removed and converted to lowercase.
+        
+        Returns:
+            Dict[str, str]: Mapping from environment variable name (prefix removed and lowercased) to its string value.
+        """
         env_vars: Dict[str, str] = {}
         prefix = "PDF_SCRAPER_"
         
@@ -128,7 +133,17 @@ class ConfigManager:
         return env_vars
     
     def from_dict(self, config_dict: Dict[str, Any]) -> JobConfig:
-        """Create job config from dictionary. Accepts flat keys or nested sections (ocr/render/preprocess/text_layer)."""
+        """
+        Builds a JobConfig from a flat or nested configuration dictionary.
+        
+        Accepts either top-level keys or nested sections ("ocr", "render", "preprocess", "text_layer", "rs_correction"). Recognizes legacy "pdf_path" as an alias for "input_path" and coerces the resulting input path to a string. Requires "output_root" to be present in the provided dictionary.
+        
+        Parameters:
+            config_dict (Dict[str, Any]): Configuration values; section keys may contain the same option names as top-level keys (top-level keys take precedence).
+        
+        Returns:
+            JobConfig: A fully populated JobConfig with nested OCR, render, preprocess, text-layer, and RS-correction subconfigs. Numeric RS fields are clamped: `error_correction_bytes` is at least 1 and `block_size` is at least 64. The `use_ocr` field defaults to `True` when not provided.
+        """
         ocr_section: Dict[str, Any] = config_dict.get("ocr", {}) if isinstance(config_dict.get("ocr", {}), dict) else {}
         render_section: Dict[str, Any] = config_dict.get("render", {}) if isinstance(config_dict.get("render", {}), dict) else {}
         preprocess_section: Dict[str, Any] = config_dict.get("preprocess", {}) if isinstance(config_dict.get("preprocess", {}), dict) else {}
@@ -204,7 +219,14 @@ class ConfigManager:
         )
     
     def from_env(self) -> JobConfig:
-        """Create job config from environment variables"""
+        """
+        Build a JobConfig populated from current PDF_SCRAPER_* environment variables.
+        
+        Parses recognized environment keys (including either `input_path` or `pdf_path`) and converts boolean, integer, and float string values to their respective types. Unparsable numeric values are ignored. Ensures `pdf_path` and `output_root` are present in the resulting configuration (set to empty string if absent).
+        
+        Returns:
+            JobConfig: A JobConfig populated from the environment variables.
+        """
         # Reload environment variables to get the latest values
         self._env_vars = self._load_env_vars()
         
@@ -395,12 +417,27 @@ config_manager = ConfigManager()
 
 
 def get_config_manager() -> ConfigManager:
-    """Get singleton config manager instance"""
+    """
+    Provide access to the module-level ConfigManager singleton.
+    
+    Returns:
+        config_manager (ConfigManager): The shared ConfigManager instance.
+    """
     return config_manager
 
 
 def create_job_config(input_path: str, output_root: str | None = None, **kwargs: Any) -> JobConfig:
-    """Create a new job configuration"""
+    """
+    Create a JobConfig by merging the provided paths with additional configuration options.
+    
+    Parameters:
+        input_path (str): Path to the input file (PDF, EPUB, etc.).
+        output_root (str | None): Destination root for outputs; empty string used if None.
+        **kwargs: Additional flat or nested configuration values forwarded to the configuration loader.
+    
+    Returns:
+        JobConfig: A populated JobConfig built from the merged values.
+    """
     config_dict: Dict[str, Any] = {
         "input_path": input_path,
         "output_root": output_root or "",

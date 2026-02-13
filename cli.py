@@ -7,6 +7,11 @@ from scraper import run_pdf_job
 from utils import validate_runtime_env, print_env_report
 
 def main():
+    """
+    Parse CLI arguments and run OCR scraping jobs for PDF or EPUB files.
+    
+    This is the command-line entry point: it parses options, validates the runtime environment (or prints an environment report when requested), and either loads a job configuration from a JSON/YAML file or builds per-file job configurations. Supported options include output directory, OCR language and engine settings, quality vs. fast modes, custom tessdata directory, render persistence, worker pool size, and Reed–Solomon error-correction settings. For each input file the function selects the appropriate scraper (PDF or EPUB), executes the job, and prints a concise success/failure status and output location.
+    """
     parser = argparse.ArgumentParser(description="PDF/EPUB OCR scraper (EasyOCR + Tesseract)")
     parser.add_argument("files", nargs="*", help="PDF or EPUB file(s) to process")
     parser.add_argument("--output", "-o", default="output", help="Output root directory")

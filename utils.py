@@ -19,7 +19,15 @@ from deps import (
 
 
 def sanitize_tessdata_prefix(prefix: str | None):
-    """Return a clean absolute tessdata prefix without stray quotes."""
+    """
+    Normalize and resolve a TESSDATA_PREFIX value to an absolute path.
+    
+    Parameters:
+        prefix (str | None): A tessdata prefix value (may include surrounding quotes, whitespace, or ~), or None.
+    
+    Returns:
+        str | None: An absolute, resolved path string with surrounding quotes and spaces removed; if prefix is falsy returns None; if resolution fails returns the stripped prefix string as a fallback.
+    """
     if not prefix:
         return None
     try:
@@ -30,7 +38,15 @@ def sanitize_tessdata_prefix(prefix: str | None):
 
 
 def split_langs(lang_value: str) -> List[str]:
-    """Split a Tesseract lang string like "ben+eng" or "ben,eng" into codes."""
+    """
+    Convert a Tesseract language specifier (e.g., "ben+eng" or "ben,eng") into a list of language codes.
+    
+    Parameters:
+        lang_value (str): Language specification string containing language codes separated by '+' or ','.
+    
+    Returns:
+        List[str]: Ordered list of trimmed language code strings; returns an empty list for falsy input.
+    """
     if not lang_value:
         return []
     parts = lang_value.replace(',', '+').split('+')
@@ -109,7 +125,14 @@ def resolve_tesseract_cmd():
 
 
 def check_tesseract_ready() -> Tuple[bool, str]:
-    """Check pytesseract import and tesseract executable availability."""
+    """
+    Validate that pytesseract can be imported and that a runnable Tesseract executable is available.
+    
+    If the TESSDATA_PREFIX environment variable is present it will be normalized and set in the environment before probing Tesseract. The function also checks the Tesseract major version and treats versions below 4 as unsupported.
+    
+    Returns:
+        tuple: `True` and a success message containing the resolved executable path and version if Tesseract is usable; `False` and a diagnostic message explaining the problem otherwise.
+    """
     if not TESSERACT_AVAILABLE:
         exe = sys.executable
         return False, f"pytesseract not importable in this Python. Install with: \n  {exe} -m pip install pytesseract"

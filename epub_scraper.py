@@ -100,7 +100,33 @@ class EPUBScraper:
         rs_verify_only=False,
         **kwargs
     ):
-        """Initialize EPUB scraper."""
+        """
+        Construct an EPUBScraper configured for extracting text and optional OCR (and optional Reed–Solomon encoding).
+        
+        Parameters:
+            epub_path (str): Path to the input EPUB file.
+            output_dir (str): Directory where extraction outputs will be written.
+            use_ocr (bool): Enable OCR on image resources when True.
+            ocr_method (str): OCR backend identifier (e.g., 'easyocr', 'tesseract').
+            ocr_lang (str): Language code used by the OCR engine.
+            progress_callback (callable|None): Optional callback invoked with progress/log messages.
+            tessdata_dir (str|None): Custom Tesseract tessdata directory when using Tesseract.
+            stop_event (threading.Event|None): Optional event to request early cancellation.
+            quality_mode (bool): Prefer higher-quality OCR/rendering when True.
+            persist_renders (bool): If True, save intermediate rendered images to disk.
+            max_workers (int|None): Maximum number of worker threads for parallel tasks, if supported.
+            fast_mode (bool): Enable faster, lower-latency OCR/render paths when True.
+        
+            rs_enabled (bool): Enable Reed–Solomon error-correction encoding of saved content.
+            rs_error_correction_bytes (int): Number of parity bytes used by the RS encoder.
+            rs_block_size (int): Block size (in bytes) used when encoding content with RS.
+            rs_enable_correction (bool): If True, encode output with error-correction parity.
+            rs_verify_only (bool): If True, only verify RS encoding without writing correction data.
+        
+        Notes:
+            - If Reed–Solomon support is requested but the RS library is unavailable, RS will be disabled and an error will be logged.
+            - The constructor creates the output directory if it does not exist and initializes the OCR pipeline.
+        """
         self.epub_path = epub_path
         self.output_dir = output_dir
         self.use_ocr = use_ocr
@@ -164,7 +190,17 @@ class EPUBScraper:
     
     @classmethod
     def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
-        """Construct an EPUBScraper directly from a JobConfig."""
+        """
+        Create an EPUBScraper configured from a JobConfig.
+        
+        Parameters:
+            job_config (JobConfig): Source configuration containing input/output paths, OCR, render, worker, and Reed–Solomon settings used to initialize the scraper.
+            progress_callback (callable, optional): Callback invoked with progress/log messages; may be None.
+            stop_event (threading.Event, optional): Event used to signal early cancellation; may be None.
+        
+        Returns:
+            EPUBScraper: An instance initialized according to the provided JobConfig.
+        """
         return cls(
             epub_path=job_config.input_path,
             output_dir=os.path.join(job_config.output_root, Path(job_config.input_path).stem),
@@ -187,7 +223,11 @@ class EPUBScraper:
         )
     
     def log(self, message):
-        """Log a message."""
+        """
+        Append a timestamped message to the extraction log, notify the progress callback, and record the message with the logger if available.
+        
+        This method adds a line prefixed with the current time to self.results['extraction_log'], invokes self.progress_callback(message) when a callback is set (exceptions raised by the callback are caught and logged via self.logger.error if a logger exists), and calls self.logger.info(message) when a logger is available.
+        """
         self.results['extraction_log'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
         if self.progress_callback:
             try:
@@ -448,7 +488,17 @@ class EPUBScraper:
         }
     
     def save_results(self):
-        """Save scraping results to output directory."""
+        """
+        Persist extracted EPUB results to the scraper's output directory.
+        
+        Saves page contents to content.txt, metadata to metadata.txt, statistics to statistics.txt,
+        and the extraction log to extraction.log. If Reed–Solomon (RS) error correction is enabled
+        and an RS corrector is available, also writes an RS-encoded file content.rs using the
+        corrector; in that case a plain content.txt is still written.
+        
+        Returns:
+            bool: `True` if all files were written successfully, `False` otherwise.
+        """
         try:
             # Save text content - with or without Reed-Solomon correction
             if self.rs_enabled and self.rs_corrector:

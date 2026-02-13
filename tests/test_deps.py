@@ -12,10 +12,25 @@ class TestDeps(unittest.TestCase):
         class FakeCuda:
             @staticmethod
             def is_available():
+                """
+                Indicates whether the CUDA backend is available.
+                
+                Returns:
+                    bool: `True` if CUDA is available, `False` otherwise.
+                """
                 return True
 
             @staticmethod
             def get_device_name(_idx: int):
+                """
+                Return a device name string representing a fake CUDA GPU.
+                
+                Parameters:
+                    _idx (int): Ignored index parameter kept for compatibility.
+                
+                Returns:
+                    str: The fake device name "Fake GPU".
+                """
                 return "Fake GPU"
 
         class FakeBackends:
@@ -35,6 +50,13 @@ class TestDeps(unittest.TestCase):
             self.assertIn("Fake GPU", info["reason"])
 
     def test_detect_torch_device_cpu(self):
+        """
+        Verify detect_torch_device reports a CPU fallback when neither CUDA nor MPS are available.
+        
+        Patches the deps module to appear installed and replaces torch with a fake module whose
+        cuda.is_available() and backends.mps.is_available() both return False, then asserts
+        the detected backend is "cpu" and the reason mentions a fallback.
+        """
         class FakeCuda:
             @staticmethod
             def is_available():

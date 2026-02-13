@@ -26,25 +26,20 @@ class RSTextCorrector:
     
     def __init__(self, error_correction_bytes: int = 10):
         """
-        Initialize the Reed-Solomon text corrector.
+        Create an RSTextCorrector configured with the specified number of Reed–Solomon error-correction bytes.
         
-        Args:
-            error_correction_bytes: Number of error correction bytes to use
-                (default: 10). Higher values provide better error correction
-                but increase file size.
+        Parameters:
+            error_correction_bytes (int): Number of parity bytes used for Reed–Solomon encoding. Larger values increase error-correction capacity and the size of encoded output (default: 10).
         """
         self.error_correction_bytes = error_correction_bytes
         self.rs = RSCodec(error_correction_bytes)
     
     def encode_text(self, text: str) -> bytes:
         """
-        Encode text with Reed-Solomon error correction.
+        Encode the given UTF-8 text and append Reed–Solomon error-correction bytes.
         
-        Args:
-            text: The text to encode
-            
         Returns:
-            Encoded bytes with error correction data
+            bytes: Encoded bytes containing the UTF-8 payload followed by Reed–Solomon parity bytes.
         """
         try:
             # Encode text to UTF-8 bytes
@@ -67,16 +62,16 @@ class RSTextCorrector:
     
     def decode_text(self, encoded_bytes: bytes) -> Tuple[str, bool, int]:
         """
-        Decode and correct encoded text.
+        Decode RS-encoded bytes into UTF-8 text and report correction results.
         
-        Args:
-            encoded_bytes: The encoded bytes with error correction data
-            
+        Parameters:
+            encoded_bytes (bytes): RS-encoded data produced by encode_text or an equivalent encoder.
+        
         Returns:
-            Tuple containing:
-                - Decoded text
-                - Boolean indicating if errors were corrected
-                - Number of errors corrected
+            Tuple[str, bool, int]: 
+                decoded_text: The decoded UTF-8 string.
+                corrected: `true` if Reed–Solomon corrected any errors, `false` if the data was already intact.
+                errors_corrected: Number of byte positions that differed between the original encoded input and its re-encoded form (0 if intact).
         """
         try:
             # First, verify the data
@@ -102,15 +97,13 @@ class RSTextCorrector:
     
     def verify_text(self, encoded_bytes: bytes) -> Tuple[bool, Optional[int]]:
         """
-        Verify the integrity of encoded text without decoding.
+        Check whether RS-encoded UTF-8 bytes are intact by re-encoding decoded data and comparing byte-wise.
         
-        Args:
-            encoded_bytes: The encoded bytes to verify
-            
+        Parameters:
+            encoded_bytes (bytes): RS-encoded UTF-8 data to verify.
+        
         Returns:
-            Tuple containing:
-                - Boolean indicating if the data is intact
-                - Number of errors detected (or None if verification failed)
+            Tuple[bool, Optional[int]]: `true` if the encoded bytes exactly match the re-encoded bytes, `false` otherwise; the number of differing bytes when verification succeeds but data differs, or `None` if verification failed due to an internal error.
         """
         try:
             # To verify, we need to check if decoding would produce errors
@@ -140,14 +133,14 @@ class RSTextCorrector:
     
     def encode_and_save(self, text: str, output_path: str) -> bool:
         """
-        Encode text and save to file with Reed-Solomon error correction.
+        Encode text with Reed–Solomon error correction and write the resulting bytes to the given file path.
         
-        Args:
-            text: The text to encode
-            output_path: Path to save the encoded file
-            
+        Parameters:
+            text (str): UTF-8 text to encode.
+            output_path (str): Filesystem path where encoded bytes will be written in binary mode.
+        
         Returns:
-            Boolean indicating success
+            bool: `True` if the encoded bytes were written successfully, `False` otherwise.
         """
         try:
             encoded_bytes = self.encode_text(text)
@@ -164,16 +157,13 @@ class RSTextCorrector:
     
     def load_and_decode(self, file_path: str) -> Tuple[Optional[str], bool, int]:
         """
-        Load an encoded file and decode the text.
+        Load an encoded file from disk and decode its text using this corrector.
         
-        Args:
-            file_path: Path to the encoded file
-            
         Returns:
-            Tuple containing:
-                - Decoded text (or None if failed)
-                - Boolean indicating if errors were corrected
-                - Number of errors corrected
+            Tuple[Optional[str], bool, int]: (decoded_text, corrected, errors_corrected)
+                - decoded_text: Decoded UTF-8 string, or `None` if decoding failed.
+                - corrected: `True` if Reed–Solomon correction was applied, `False` otherwise.
+                - errors_corrected: Number of byte errors corrected.
         """
         try:
             with open(file_path, 'rb') as f:
@@ -187,17 +177,20 @@ class RSTextCorrector:
     
     def correct_text_fragment(self, text: str, max_errors: int = 5) -> Tuple[str, int]:
         """
-        Apply Reed-Solomon error correction to a text fragment.
+        Correct OCR-extracted text fragment using Reed–Solomon error correction.
         
-        This method is specifically designed for OCR-extracted text where
-        character-level errors are common.
+        This method is intended to correct character-level errors common in OCR output by encoding
+        the fragment with the internal Reed–Solomon codec and attempting recovery. In the current
+        implementation this is a no-op: the original text is returned unchanged and the correction
+        count is 0.
         
-        Args:
-            text: Text fragment to correct
-            max_errors: Maximum number of errors to allow (default: 5)
-            
+        Parameters:
+            text (str): The OCR-extracted text fragment to correct.
+            max_errors (int): Maximum number of byte errors to attempt to correct (default 5).
+        
         Returns:
-            Tuple containing corrected text and number of errors fixed
+            Tuple[str, int]: A tuple of (corrected_text, errors_corrected). `errors_corrected` is
+            the number of corrections applied (0 in the current implementation).
         """
         try:
             # Encode the text
@@ -219,13 +212,13 @@ class RSTextCorrector:
 
 def create_rs_corrector(error_correction_bytes: int = 10) -> RSTextCorrector:
     """
-    Factory function to create a Reed-Solomon text corrector instance.
+    Create an RSTextCorrector configured with the given number of error-correction bytes.
     
-    Args:
-        error_correction_bytes: Number of error correction bytes (default: 10)
-        
+    Parameters:
+        error_correction_bytes (int): Number of Reed–Solomon parity (error-correction) bytes to include in encoded output; larger values increase correction capability at the cost of added size.
+    
     Returns:
-        RSTextCorrector instance
+        RSTextCorrector: A new corrector instance configured with the specified error-correction length.
     """
     return RSTextCorrector(error_correction_bytes)
 
@@ -247,17 +240,17 @@ def encode_text(text: str, error_correction_bytes: int = 10) -> bytes:
 
 def decode_text(encoded_bytes: bytes, error_correction_bytes: int = 10) -> Tuple[str, bool, int]:
     """
-    Convenience function to decode Reed-Solomon encoded text.
+    Decode Reed-Solomon encoded UTF-8 text using the specified error correction strength.
     
-    Args:
-        encoded_bytes: Encoded bytes with error correction data
-        error_correction_bytes: Number of error correction bytes (default: 10)
-        
+    Parameters:
+        encoded_bytes (bytes): RS-encoded bytes produced by this module's encoder.
+        error_correction_bytes (int): Number of Reed-Solomon error correction/parity bytes used when encoding (default 10).
+    
     Returns:
-        Tuple containing:
-            - Decoded text
-            - Boolean indicating if errors were corrected
-            - Number of errors corrected
+        tuple: (decoded_text, errors_corrected_flag, errors_corrected_count)
+            - decoded_text (str): The recovered UTF-8 text.
+            - errors_corrected_flag (bool): `true` if decoding corrected any errors, `false` otherwise.
+            - errors_corrected_count (int): Number of byte errors corrected during decoding.
     """
     corrector = create_rs_corrector(error_correction_bytes)
     return corrector.decode_text(encoded_bytes)
@@ -265,16 +258,14 @@ def decode_text(encoded_bytes: bytes, error_correction_bytes: int = 10) -> Tuple
 
 def verify_text(encoded_bytes: bytes, error_correction_bytes: int = 10) -> Tuple[bool, Optional[int]]:
     """
-    Convenience function to verify Reed-Solomon encoded text.
+    Check whether Reed–Solomon encoded bytes are intact and report detected byte differences.
     
-    Args:
-        encoded_bytes: Encoded bytes to verify
-        error_correction_bytes: Number of error correction bytes (default: 10)
-        
+    Parameters:
+        encoded_bytes (bytes): Reed–Solomon encoded payload to verify.
+        error_correction_bytes (int): Number of RS parity/error-correction bytes used when the data was encoded.
+    
     Returns:
-        Tuple containing:
-            - Boolean indicating if the data is intact
-            - Number of errors detected
+        tuple (bool, Optional[int]): `True` if the provided bytes match the re-encoded data; if not intact, an integer count of differing bytes is returned; returns `None` for the error count if verification failed due to an exception.
     """
     corrector = create_rs_corrector(error_correction_bytes)
     return corrector.verify_text(encoded_bytes)

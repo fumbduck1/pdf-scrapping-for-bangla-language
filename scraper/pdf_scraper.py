@@ -108,7 +108,48 @@ class PDFScraper:
         rs_enable_correction=True,
         rs_verify_only=False,
     ):
-        """Initialize PDF scraper."""
+        """
+        Create a PDFScraper configured to process a PDF and save OCR results.
+        
+        Initializes scraper paths, OCR and rendering options, performance tuning, Reed–Solomon parameters, and callbacks, then prepares output directories.
+        
+        Parameters:
+            pdf_path (str): Path to the input PDF file.
+            output_dir (str): Directory where outputs and intermediate renders will be written.
+            use_ocr (bool): Whether to run OCR on pages.
+            ocr_method (str): OCR backend to use (e.g., "easyocr", "tesseract").
+            ocr_lang (str): Primary OCR language code (e.g., "ben").
+            progress_callback (callable|None): Optional callback(progress:int, page:int) for progress reporting.
+            tessdata_dir (str|None): Path prefix for Tesseract language data; will be sanitized.
+            stop_event (object|None): Optional event-like object checked to cancel processing.
+            quality_mode: Quality/performance preset used by rendering/OCR components.
+            persist_renders (bool): If true, keep rendered page images on disk.
+            max_workers (int|None): Max concurrent worker threads; None lets scraper choose.
+            fast_mode (bool): Enable faster heuristics that may skip expensive passes.
+            fast_confidence_skip (float): Confidence threshold used by fast-mode skipping logic.
+            pdf_bytes_cache_mb (int): Memory cap (MB) for caching PDF bytes.
+            zoom (float): Default render zoom factor for page images.
+            high_dpi_zoom (float): Zoom factor used when a high-DPI retry is attempted.
+            header_footer_crop_pct (float): Fraction of page height to treat as header/footer for cropping heuristics.
+            watermark_flatten (bool): Whether to apply background flattening to mitigate watermarks.
+            quantize_levels (int): Number of color levels for image quantization.
+            quantize_dither (float): Dithering amount for quantization.
+            third_pass_scale (float): Scale factor for an optional third OCR pass.
+            text_layer_first (bool): Prefer extracting PDF native text layer before running OCR.
+            text_layer_lang_min_ratio (float): Minimum language-character ratio to accept text-layer extraction.
+            text_layer_min_ben_chars (int): Min Bengali characters required to accept text-layer extraction.
+            render_cache_max_items (int): Max cached rendered pages to keep in memory.
+            share_ocr_instances (bool): Reuse a single OCR pipeline instance across pages when true.
+            ocr_pipeline_factory (callable|None): Factory that returns a configured OCR pipeline instance.
+            auto_append_eng_for_ben (bool): Automatically append English model when Bengali selected.
+            segment_retry_conf, easyocr_fallback_conf, easyocr_primary_conf: Configuration objects for segmentation and EasyOCR passes.
+            tesseract_refine_min_chars (int): Minimum characters to trigger Tesseract refinement passes.
+            rs_enabled (bool): Enable Reed–Solomon encoding/verification of outputs.
+            rs_error_correction_bytes (int): Number of RS parity bytes for error correction.
+            rs_block_size (int): Block size (bytes) used when encoding with Reed–Solomon.
+            rs_enable_correction (bool): If true, attempt to correct errors when decoding RS data.
+            rs_verify_only (bool): If true, only verify RS-encoded files without applying corrections.
+        """
         self.pdf_path = pdf_path
         self.output_dir = output_dir
         self.use_ocr = use_ocr
@@ -203,6 +244,12 @@ class PDFScraper:
         )
 
     def _build_ocr_pipeline(self):
+        """
+        Create an OcrPipeline configured from the scraper's OCR and preprocessing settings.
+        
+        Returns:
+            OcrPipeline: An OcrPipeline instance initialized with the scraper's method, language, quality/fast modes, tessdata path, logging callbacks, header/footer and watermark options, and OCR-specific retry/fallback parameters.
+        """
         return OcrPipeline(
             ocr_method=self.ocr_method,
             ocr_lang=self.ocr_lang,
@@ -223,6 +270,14 @@ class PDFScraper:
         )
 
     def _get_ocr_pipeline(self):
+        """
+        Return an OCR pipeline instance for use by the scraper, reusing a cached instance when sharing is enabled.
+        
+        If `share_ocr_instances` is True and a pipeline was previously created, the cached instance is returned; otherwise a new pipeline is constructed (and cached if sharing is enabled).
+        
+        Returns:
+            The OCR pipeline instance to use for page processing. 
+        """
         if self.share_ocr_instances and self.ocr:
             return self.ocr
         pipeline = self._ocr_factory()
@@ -231,7 +286,11 @@ class PDFScraper:
         return pipeline
 
     def setup_directories(self):
-        """Create all necessary directories upfront."""
+        """
+        Ensure the scraper output directory and a 'renders' subdirectory exist.
+        
+        Creates self.output_dir and a 'renders' subdirectory, assigns the subdirectory path to self.renders_dir, and silently ignores any filesystem errors.
+        """
         try:
             os.makedirs(self.output_dir, exist_ok=True)
             self.renders_dir = os.path.join(self.output_dir, 'renders')
@@ -240,7 +299,12 @@ class PDFScraper:
             pass
 
     def _worker_count(self):
-        """Optimized worker pool size for parallel OCR processing."""
+        """
+        Choose an optimal number of worker processes for parallel OCR processing.
+        
+        Returns:
+            int: Number of workers to use; equals self.max_workers when set, otherwise uses the system CPU count minus one, with a minimum of 1.
+        """
         try:
             return self.max_workers or (os.cpu_count() or 4) - 1
         except Exception:
@@ -270,7 +334,11 @@ class PDFScraper:
             self.log_error(f"Language verification error: {e}")
 
     def cleanup_renders(self):
-        """Delete renders directory after processing to save space."""
+        """
+        Remove the renderer output directory to free disk space.
+        
+        Deletes the configured renders directory if it exists. Any exceptions raised during removal are suppressed.
+        """
         try:
             if os.path.exists(self.renders_dir):
                 import shutil
@@ -287,7 +355,11 @@ class PDFScraper:
         pass
 
     def open_pdf(self):
-        """Open PDF document."""
+        """
+        Initialize the PDF renderer for the configured PDF file and determine the document's total page count.
+        
+        This creates and opens a PdfRenderer assigned to `self.renderer`. If PyPDF is available and the renderer exposes a parsed document, the method sets `self._page_count` to the number of pages.
+        """
         self.renderer = PdfRenderer(
             self.pdf_path, self.output_dir, self.pdf_bytes_cache_mb, detect_poppler_path(),
             self.log, self.log_error, self.persist_renders, self.render_cache_max_items
@@ -301,11 +373,28 @@ class PDFScraper:
             self._page_count = len(self.renderer.doc.pages)
 
     def preprocess_image_for_ocr(self, image_path):
-        """Optimized preprocessing with advanced quantization for Bengali/English text."""
+        """
+        Preprocess an image for OCR using the configured OCR pipeline with optimizations for Bengali and English.
+        
+        Parameters:
+            image_path (str | os.PathLike): Path to the image file to preprocess.
+        
+        Returns:
+            The preprocessing result produced by the OCR pipeline (for example a processed image object or a temporary file path).
+        """
         return self._get_ocr_pipeline().preprocess_image_for_ocr(image_path)
 
     def render_page_to_image(self, page_num, zoom=None):
-        """Render a single page using pdf2image/Poppler; returns (PIL image, saved_path|None)."""
+        """
+        Render a specific PDF page to an image using the configured PDF renderer.
+        
+        Parameters:
+            page_num (int): Page identifier passed to the renderer (as expected by the renderer).
+            zoom (float | None): Zoom factor to use for rendering; when None the scraper's default zoom is used.
+        
+        Returns:
+            tuple: `(PIL.Image.Image, str | None)` where the first element is the rendered PIL image and the second is the filesystem path where the rendered image was saved (or `None` if no file was written). Returns `None` if no renderer is available.
+        """
         if self.renderer:
             if zoom is None:
                 zoom = self.zoom
@@ -314,7 +403,11 @@ class PDFScraper:
 
     @timer("page_processing")
     def _process_page_with_ocr(self, page_num):
-        """Optimized page processing with intelligent retry logic and error recovery."""
+        """
+        Process a single PDF page by rendering it to an image, running OCR, and returning the structured result.
+        
+        On success returns a PageResult with the 1-based page_number, extracted text and OCR metadata (confidence, fragments, and method). If rendering or OCR fails, returns a PageResult with the 1-based page_number and an error message.
+        """
         img = self.render_page_to_image(page_num)
         
         if img is None:
@@ -343,22 +436,65 @@ class PDFScraper:
         return page_result
 
     def _normalize_text(self, text):
-        """Strip zero-width characters and normalize whitespace."""
+        """
+        Normalize text by removing zero-width characters and collapsing/standardizing whitespace.
+        
+        Parameters:
+            text (str): Input string to normalize.
+        
+        Returns:
+            str: The cleaned string with zero-width characters removed and whitespace normalized.
+        """
         return normalize_text(text)
 
     def _bangla_ratio(self, text: str):
-        """Return (ratio, count) of Bangla characters in the text."""
+        """
+        Return the proportion of Bangla characters and their count in the given text.
+        
+        Returns:
+            tuple: (ratio, count) where `ratio` is the fraction of characters that are Bangla (0.0–1.0) and `count` is the number of Bangla characters.
+        """
         return bangla_ratio(text)
 
     def _flatten_background(self, image, clip=None):
+        """
+        Flatten the image background to reduce watermarks and uneven backgrounds.
+        
+        Parameters:
+            image: Image to be processed.
+            clip (float, optional): Threshold (typically 0–1) that controls flattening intensity; if omitted, the scraper's `watermark_clip_threshold` is used.
+        
+        Returns:
+            The background-flattened image.
+        """
         clip_val = self.watermark_clip_threshold if clip is None else clip
         return preproc.flatten_background(image, clip=clip_val)
 
     def _choose_psm(self, image, segment_count):
+        """
+        Selects an appropriate Tesseract page segmentation mode (PSM) for the given page image and detected segment count.
+        
+        Parameters:
+            image: The page image to evaluate (e.g., PIL Image or numpy array).
+            segment_count (int): Number of text/image segments detected on the page.
+        
+        Returns:
+            int: The chosen Tesseract PSM value.
+        """
         return preproc.choose_psm(image, segment_count)
 
     def _extract_text_layer(self, page):
-        """Fast path: pull native text from the PDF; returns normalized string or ''."""
+        """
+        Extracts and normalizes the PDF page's native text layer.
+        
+        Attempts to extract the page's native text and return it after normalization. Returns an empty string if no text is available or if extraction fails.
+        
+        Parameters:
+        	page: PDF page object — the page from which to extract native text.
+        
+        Returns:
+        	normalized_text (str): The normalized text from the page's text layer, or an empty string if unavailable or extraction fails.
+        """
         try:
             text = page.extract_text()
             if text:
@@ -369,24 +505,60 @@ class PDFScraper:
         return ""
 
     def _score_result(self, res):
-        """Enhanced scoring algorithm for OCR result comparison."""
+        """
+        Compute a numeric quality score for an OCR result.
+        
+        Parameters:
+            res: OCR result object or dictionary containing recognized text and related metadata.
+        
+        Returns:
+            score (float): A numeric score representing the quality or confidence of the OCR result.
+        """
         return ocr_t.score_result(res)
 
     def _run_tesseract_pass(self, image, extra_config=None, extra_dilate=False, psm=None):
-        """Run one Tesseract pass on a PIL image with optional extra dilation and config."""
+        """
+        Perform a Tesseract OCR pass on a PIL image using optional config and dilation.
+        
+        Parameters:
+            image (PIL.Image.Image): The image to run Tesseract on.
+            extra_config (str | None): Additional Tesseract configuration options (raw config string) to apply for this pass.
+            extra_dilate (bool): If True, apply an extra dilation preprocessing step before OCR.
+            psm (int | None): Optional Tesseract Page Segmentation Mode (PSM) to use for this pass.
+        
+        Returns:
+            object: The OCR pass result produced by the pipeline (typically includes recognized text, confidence metrics, and any fragment details).
+        """
         return self._get_ocr_pipeline()._run_tesseract_pass(image, extra_config, extra_dilate, psm)
 
     def _get_easyocr_reader(self):
-        """Delegate to OCR pipeline's _get_easyocr_reader method."""
+        """
+        Return an EasyOCR reader instance configured for this scraper's OCR settings.
+        
+        Returns:
+            reader: An EasyOCR `Reader` object configured with the scraper's current OCR language and options.
+        """
         return self._get_ocr_pipeline()._get_easyocr_reader()
 
     def _run_easyocr_pass(self, image):
-        """Delegate to OCR pipeline's _run_easyocr_pass method."""
+        """
+        Run an EasyOCR recognition pass on the given image and return its result.
+        
+        Parameters:
+            image: Image or image path to process with EasyOCR.
+        
+        Returns:
+            ocr_result: OCR output object containing recognized text, confidence scores, and bounding boxes.
+        """
         return self._get_ocr_pipeline()._run_easyocr_pass(image)
 
     @timer("page_processing")
     def scrape_all_pages(self):
-        """Scrape all pages with optional parallel OCR per page."""
+        """
+        Orchestrates OCR processing for every page of the opened PDF and stores per-page results.
+        
+        Processes pages (possibly in parallel) and populates self._page_results with a PageResult for each page. When configured, a shared OCR pipeline is created and reused. Reports progress via self.progress_callback if provided, respects self.stop_event to cancel outstanding work, logs per-page errors and records an error PageResult for failed pages, and ensures the PDF renderer is closed when finished.
+        """
         self.open_pdf()
         
         if self._page_count == 0:
@@ -433,13 +605,24 @@ class PDFScraper:
                 self.renderer.close()
 
     def save_results(self):
-        """Save results with layout-preserving output formats."""
+        """
+        Save the scraped page results to disk in multiple layout-preserving formats.
+        
+        Writes:
+        - A single plain text file with page breaks (output.txt).
+        - Reed–Solomon encoded continuous and structured text files when RS is enabled (output.rs.txt and output.structured.rs.txt).
+        - A Reed–Solomon encoded per-sentence file when RS is enabled (sentences.rs.txt).
+        """
         self._save_plain_text_files()
         self._save_rs_encoded_text()
         self._save_rs_encoded_sentences()
 
     def _save_plain_text_files(self):
-        """Save plain text files without Reed-Solomon correction."""
+        """
+        Write all page OCR texts in page order to a single file named "output.txt" in the scraper's output directory.
+        
+        The file contains each page's text in order separated by two newline characters ("\n\n"). Logs the saved path on success.
+        """
         ordered_pages = sorted(self._page_results.items(), key=lambda x: x[0])
         page_texts = [result.content for _, result in ordered_pages]
         
@@ -450,7 +633,15 @@ class PDFScraper:
         self.log(f"Plain text saved to {txt_path}")
 
     def _save_rs_encoded_text(self):
-        """Save RS-encoded text files."""
+        """
+        Save Reed–Solomon encoded versions of the scraped page texts to the output directory.
+        
+        If RS encoding is enabled (rs_error_correction_bytes > 0) this creates an RS corrector and attempts to write two encoded files:
+        - a continuous encoding (pages joined by two newlines) to "output.rs.txt"
+        - a structured encoding (pages joined by a form-feed character) to "output.structured.rs.txt"
+        
+        Successful writes are logged. If RS encoding is disabled (rs_error_correction_bytes <= 0), no files are produced.
+        """
         ordered_pages = sorted(self._page_results.items(), key=lambda x: x[0])
         page_texts = [result.content for _, result in ordered_pages]
         
@@ -470,7 +661,11 @@ class PDFScraper:
                 self.log(f"RS-encoded (structured) saved to {rs_structured_path}")
 
     def _save_rs_encoded_sentences(self):
-        """Save RS-encoded sentences file."""
+        """
+        Save Reed–Solomon–encoded sentences to sentences.rs.txt in the output directory.
+        
+        If RS encoding is enabled (rs_error_correction_bytes > 0), collects sentences from all pages in page order, encodes them with the configured RS corrector, and saves the result to "sentences.rs.txt". Logs the saved path on success. If RS encoding is not enabled, no file is written.
+        """
         ordered_pages = sorted(self._page_results.items(), key=lambda x: x[0])
         
         if self.rs_error_correction_bytes > 0:
@@ -486,14 +681,32 @@ class PDFScraper:
                 self.log(f"RS-encoded sentences saved to {rs_sentences_path}")
 
     def _decode_rs_text_file(self, rs_filename):
-        """Decode and verify an RS-encoded text file."""
+        """
+        Decode and verify a Reed–Solomon (RS) encoded text file.
+        
+        Parameters:
+            rs_filename (str): Path to the RS-encoded file to decode.
+        
+        Returns:
+            tuple: `(text, verified, errors)` where `text` is the decoded string or `None` if decoding was not performed, `verified` is `True` when the decoded data passes verification (or correction succeeded), and `errors` is the number of detected/corrected errors.
+            
+        Notes:
+            If RS error correction is disabled (error correction bytes <= 0), the function returns `(None, False, 0)`.
+        """
         if self.rs_error_correction_bytes > 0:
             corrector = rs.create_rs_corrector(self.rs_error_correction_bytes)
             return corrector.load_and_decode(rs_filename)
         return None, False, 0
 
     def _verify_rs_text_files(self):
-        """Verify all RS-encoded files in output directory."""
+        """
+        Verify all Reed–Solomon (RS) encoded text files in the scraper's output directory and log verification outcomes.
+        
+        Checks every file matching '*.rs.txt' under the configured output directory, logs a verification message for each file that passes, logs an error for each file that fails or raises an exception, and returns an aggregate success flag.
+        
+        Returns:
+            bool: `True` if every RS-encoded file was verified successfully, `False` if any file failed verification or an error occurred.
+        """
         success = True
         
         for rs_file in Path(self.output_dir).glob("*.rs.txt"):
@@ -514,7 +727,25 @@ class PDFScraper:
 
 
 def run_pdf_job(job_config: JobConfig, stop_event: Optional[object], log_cb: Optional[Callable[[str], None]]) -> JobResult:
-    """Run a single PDF job using the provided configuration."""
+    """
+    Run a single PDF scraping job configured by `job_config`.
+    
+    Parameters:
+        job_config (JobConfig): Configuration for the PDF job (paths, OCR options, RS options, etc.).
+        stop_event (Optional[object]): Optional event-like object with an `is_set()` method; if set, job may abort early.
+        log_cb (Optional[Callable[[str], None]]): Optional logging callback to receive progress and error messages.
+    
+    Returns:
+        JobResult: A dictionary with the job outcome and metrics:
+            - "scrape_ok" (bool): `True` if scraping and saving completed without an uncaught exception, `False` otherwise.
+            - "output_dir" (str): The job's configured output directory.
+            - "num_pages" (int): Number of pages processed (0 on failure).
+            - "num_errors" (int): Count of pages with errors (or 1 for a top-level failure).
+            - "num_warnings" (int): Count of pages with warnings.
+            - "runtime_seconds" (float): Total elapsed time for the job.
+            - "errors" (List[str]): Error messages collected (page errors or a single top-level error).
+            - "warnings" (List[str]): Warning messages collected.
+    """
     scraper = PDFScraper.from_job_config(job_config, stop_event=stop_event)
     scraper.log = log_cb or (lambda x: None)
     
