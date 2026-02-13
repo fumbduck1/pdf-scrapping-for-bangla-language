@@ -3,7 +3,7 @@ import logging
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
 class Logger:
     """Centralized logging manager"""
@@ -65,31 +65,31 @@ def get_logger():
     return logger.get_logger()
 
 
-def debug(msg: str, *args, **kwargs):
+def debug(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log debug message"""
     get_logger().debug(msg, *args, **kwargs)
 
 
-def info(msg: str, *args, **kwargs):
+def info(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log info message"""
     get_logger().info(msg, *args, **kwargs)
 
 
-def warning(msg: str, *args, **kwargs):
+def warning(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log warning message"""
     get_logger().warning(msg, *args, **kwargs)
 
 
-def error(msg: str, *args, **kwargs):
+def error(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log error message"""
     get_logger().error(msg, *args, **kwargs)
 
 
-def critical(msg: str, *args, **kwargs):
+def critical(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log critical message"""
     get_logger().critical(msg, *args, **kwargs)
 
 
-def exception(msg: str, *args, **kwargs):
+def exception(msg: str, *args: Any, **kwargs: Any) -> None:
     """Log exception message"""
     get_logger().exception(msg, *args, **kwargs)

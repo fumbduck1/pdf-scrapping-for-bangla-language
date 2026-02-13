@@ -27,6 +27,7 @@ coverage.xml
 # Review
 review_plan.md
 security.md
+plans/
 
 # Performance analysis
 analyze_performance.py

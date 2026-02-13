@@ -9,7 +9,7 @@ ZERO_WIDTH_CHARS = ['\u200b', '\u200c', '\u200d', '\ufeff']
 from deps import (
     _lazy_import_pypdf,
     _lazy_import_easyocr,
-    log_torch_env,
+    # log_torch_env,  # unused
     detect_torch_device,
     TESSERACT_AVAILABLE,
     pytesseract,
@@ -18,7 +18,7 @@ from deps import (
 )
 
 
-def _sanitize_tessdata_prefix(prefix: str | None):
+def sanitize_tessdata_prefix(prefix: str | None):
     """Return a clean absolute tessdata prefix without stray quotes."""
     if not prefix:
         return None
@@ -29,7 +29,7 @@ def _sanitize_tessdata_prefix(prefix: str | None):
         return prefix.strip(" '\"")
 
 
-def _split_langs(lang_value: str) -> List[str]:
+def split_langs(lang_value: str) -> List[str]:
     """Split a Tesseract lang string like "ben+eng" or "ben,eng" into codes."""
     if not lang_value:
         return []
@@ -118,7 +118,7 @@ def check_tesseract_ready() -> Tuple[bool, str]:
     if not resolved:
         return False, "tesseract not found. Add Tesseract-OCR to PATH or set pytesseract.pytesseract.tesseract_cmd"
 
-    current_prefix = _sanitize_tessdata_prefix(os.environ.get("TESSDATA_PREFIX"))
+    current_prefix = sanitize_tessdata_prefix(os.environ.get("TESSDATA_PREFIX"))
     if current_prefix:
         os.environ["TESSDATA_PREFIX"] = current_prefix
 
@@ -240,8 +240,8 @@ def print_env_report():
         for e in errors:
             print(f"- {e}")
 __all__ = [
-    "_sanitize_tessdata_prefix",
-    "_split_langs",
+    "sanitize_tessdata_prefix",
+    "split_langs",
     "normalize_text",
     "bangla_ratio",
     "resolve_tesseract_cmd",

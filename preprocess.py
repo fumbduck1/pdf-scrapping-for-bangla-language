@@ -1,20 +1,17 @@
 """Image preprocessing utilities for OCR pipelines."""
-import os
-from typing import List, Tuple
+from typing import Tuple
 
 from PIL import Image, ImageEnhance, ImageFilter
 
 from constants import (
     HEADER_FOOTER_CROP_PCT,
     WATERMARK_CLIP_THRESHOLD,
-    QUANTIZE_LEVELS,
-    QUANTIZE_DITHER,
     THIRD_PASS_SCALE,
     MAX_OCR_PIXELS,
 )
 from deps import _lazy_import_numpy
 np = _lazy_import_numpy()
-from utils import _split_langs
+from utils import split_langs
 
 # Allow large images; defer overall cap to caller if needed.
 Image.MAX_IMAGE_PIXELS = 500_000_000
@@ -24,7 +21,7 @@ _ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
 def quantize_params(ocr_lang: str, fast_mode: bool) -> Tuple[int, bool]:
     """Pick quantization levels/dither based on language mix and speed mode."""
     try:
-        langs = _split_langs(ocr_lang)
+        langs = split_langs(ocr_lang)
     except Exception:
         langs = []
     has_ben = "ben" in langs
@@ -152,7 +149,7 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
     """Full preprocessing pipeline reused by both OCR engines."""
     try:
         img = image_or_path if isinstance(image_or_path, Image.Image) else Image.open(image_or_path)
-        langs = _split_langs(ocr_lang)
+        langs = split_langs(ocr_lang)
         has_ben = "ben" in langs
         has_eng = "eng" in langs
 

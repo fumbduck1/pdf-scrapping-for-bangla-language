@@ -9,8 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import (
-    _sanitize_tessdata_prefix,
-    _split_langs,
+    sanitize_tessdata_prefix,
+    split_langs,
     normalize_text,
     bangla_ratio,
     resolve_tesseract_cmd,
@@ -24,33 +24,33 @@ from utils import (
 class TestUtils(unittest.TestCase):
     """Tests for utility functions"""
     
-    def test_sanitize_tessdata_prefix(self):
+    def testsanitize_tessdata_prefix(self):
         """Test tessdata prefix sanitization"""
         # Test basic sanitization
-        test_path = _sanitize_tessdata_prefix("test/path")
+        test_path = sanitize_tessdata_prefix("test/path")
         self.assertIsInstance(test_path, str)
         self.assertTrue(test_path)
         
-        self.assertEqual(_sanitize_tessdata_prefix("'test/path'"), str(Path("test/path").resolve()))
-        self.assertEqual(_sanitize_tessdata_prefix('"test/path"'), str(Path("test/path").resolve()))
-        self.assertEqual(_sanitize_tessdata_prefix("  test/path  "), str(Path("test/path").resolve()))
+        self.assertEqual(sanitize_tessdata_prefix("'test/path'"), str(Path("test/path").resolve()))
+        self.assertEqual(sanitize_tessdata_prefix('"test/path"'), str(Path("test/path").resolve()))
+        self.assertEqual(sanitize_tessdata_prefix("  test/path  "), str(Path("test/path").resolve()))
         
         # Test with home directory
         home_dir = str(Path.home())
-        self.assertEqual(_sanitize_tessdata_prefix("~/test/path").startswith(home_dir), True)
+        self.assertEqual(sanitize_tessdata_prefix("~/test/path").startswith(home_dir), True)
         
         # Test None and empty
-        self.assertIsNone(_sanitize_tessdata_prefix(None))
-        self.assertIsNone(_sanitize_tessdata_prefix(""))
+        self.assertIsNone(sanitize_tessdata_prefix(None))
+        self.assertIsNone(sanitize_tessdata_prefix(""))
     
-    def test_split_langs(self):
+    def testsplit_langs(self):
         """Test language string splitting"""
-        self.assertEqual(_split_langs("ben"), ["ben"])
-        self.assertEqual(_split_langs("ben+eng"), ["ben", "eng"])
-        self.assertEqual(_split_langs("ben,eng"), ["ben", "eng"])
-        self.assertEqual(_split_langs("ben + eng"), ["ben", "eng"])
-        self.assertEqual(_split_langs(""), [])
-        self.assertEqual(_split_langs(None), [])
+        self.assertEqual(split_langs("ben"), ["ben"])
+        self.assertEqual(split_langs("ben+eng"), ["ben", "eng"])
+        self.assertEqual(split_langs("ben,eng"), ["ben", "eng"])
+        self.assertEqual(split_langs("ben + eng"), ["ben", "eng"])
+        self.assertEqual(split_langs(""), [])
+        self.assertEqual(split_langs(None), [])
     
     def test_validate_runtime_env(self):
         """Test runtime environment validation"""

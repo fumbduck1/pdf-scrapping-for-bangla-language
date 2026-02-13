@@ -2,7 +2,7 @@ import argparse
 import os
 from pathlib import Path
 
-from config_manager import create_job_config
+from config_manager import create_job_config, RSCorrectionConfig
 from scraper import run_pdf_job
 from utils import validate_runtime_env, print_env_report
 
@@ -18,6 +18,12 @@ def main():
     parser.add_argument("--max-workers", type=int, help="Override worker pool size")
     parser.add_argument("--check-env", action="store_true", help="Run environment diagnostics and exit")
     parser.add_argument("--config", "-c", help="Load configuration from JSON or YAML file")
+    # Reed-Solomon error correction options
+    parser.add_argument("--rs-enabled", action="store_true", help="Enable Reed-Solomon error correction for OCR text")
+    parser.add_argument("--rs-error-bytes", type=int, default=10, help="Number of error correction bytes (default: 10)")
+    parser.add_argument("--rs-block-size", type=int, default=1024, help="Block size for encoding (default: 1024)")
+    parser.add_argument("--rs-verify-only", action="store_true", help="Only verify integrity without correcting errors")
+    parser.add_argument("--rs-disable-correction", action="store_true", help="Disable automatic error correction during decoding")
     args = parser.parse_args()
 
     if args.check_env:
@@ -63,8 +69,21 @@ def main():
         if args.persist_renders:
             config.render.persist_renders = args.persist_renders
         
-        if args.max_workers:
-            config.max_workers = args.max_workers
+        # RS correction configuration
+        if args.rs_enabled:
+            config.rs_correction.enabled = args.rs_enabled
+        
+        if args.rs_error_bytes:
+            config.rs_correction.error_correction_bytes = args.rs_error_bytes
+        
+        if args.rs_block_size:
+            config.rs_correction.block_size = args.rs_block_size
+        
+        if args.rs_verify_only:
+            config.rs_correction.verify_only = args.rs_verify_only
+        
+        if args.rs_disable_correction:
+            config.rs_correction.enable_correction = False
         
         # Validate configuration
         errors = config_manager.validate_config(config)
@@ -103,6 +122,13 @@ def main():
                 tessdata_dir=args.tessdata_dir,
                 persist_renders=args.persist_renders,
                 max_workers=args.max_workers,
+                rs_correction=RSCorrectionConfig(
+                    enabled=args.rs_enabled,
+                    error_correction_bytes=args.rs_error_bytes,
+                    block_size=args.rs_block_size,
+                    enable_correction=not args.rs_disable_correction,
+                    verify_only=args.rs_verify_only
+                )
             )
             print(f"Processing {file_path.name} ...")
             

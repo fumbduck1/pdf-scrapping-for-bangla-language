@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config_manager import create_job_config
-from scraper import run_pdf_job
+from scraper import run_pdf_job, JobResult
 from performance import get_monitor, print_performance_report
 
 
@@ -41,7 +41,7 @@ def analyze_performance():
     
     # Run the job
     start_time = time.time()
-    result = run_pdf_job(config, stop_event=None, log_cb=print)
+    result: JobResult = run_pdf_job(config, stop_event=None, log_cb=print)
     total_time = time.time() - start_time
     
     print("\n" + "-" * 50)
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         monitor.clear()
             
         start_time = time.time()
-        result = run_pdf_job(config, stop_event=None, log_cb=print)
+        result: JobResult = run_pdf_job(config, stop_event=None, log_cb=print)
         total_time = time.time() - start_time
             
         print_performance_report()

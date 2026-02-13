@@ -39,6 +39,11 @@ class OCRConfig:
     fast_mode: bool = FAST_MODE
     fast_confidence_skip: float = FAST_CONFIDENCE_SKIP
     tessdata_dir: Optional[str] = None
+    auto_append_eng_for_ben: bool = AUTO_APPEND_ENG_FOR_BEN
+    segment_retry_conf: float = SEGMENT_RETRY_CONF
+    easyocr_fallback_conf: float = EASYOCR_FALLBACK_CONF
+    easyocr_primary_conf: float = EASYOCR_PRIMARY_CONF
+    tesseract_refine_min_chars: int = TESSERACT_REFINE_MIN_CHARS
 
 
 @dataclass
@@ -72,6 +77,16 @@ class TextLayerConfig:
 
 
 @dataclass
+class RSCorrectionConfig:
+    """Reed-Solomon error correction configuration"""
+    enabled: bool = False
+    error_correction_bytes: int = 10
+    block_size: int = 1024
+    enable_correction: bool = True
+    verify_only: bool = False
+
+
+@dataclass
 class JobConfig:
     """Complete job configuration"""
     input_path: str
@@ -81,6 +96,7 @@ class JobConfig:
     render: RenderConfig = field(default_factory=RenderConfig)
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     text_layer: TextLayerConfig = field(default_factory=TextLayerConfig)
+    rs_correction: RSCorrectionConfig = field(default_factory=RSCorrectionConfig)
     max_workers: Optional[int] = None
     
     @property
@@ -102,7 +118,7 @@ class ConfigManager:
     
     def _load_env_vars(self) -> Dict[str, str]:
         """Load configuration from environment variables"""
-        env_vars = {}
+        env_vars: Dict[str, str] = {}
         prefix = "PDF_SCRAPER_"
         
         for key, value in os.environ.items():
@@ -113,10 +129,10 @@ class ConfigManager:
     
     def from_dict(self, config_dict: Dict[str, Any]) -> JobConfig:
         """Create job config from dictionary. Accepts flat keys or nested sections (ocr/render/preprocess/text_layer)."""
-        ocr_section = config_dict.get("ocr", {}) if isinstance(config_dict.get("ocr", {}), dict) else {}
-        render_section = config_dict.get("render", {}) if isinstance(config_dict.get("render", {}), dict) else {}
-        preprocess_section = config_dict.get("preprocess", {}) if isinstance(config_dict.get("preprocess", {}), dict) else {}
-        text_layer_section = config_dict.get("text_layer", {}) if isinstance(config_dict.get("text_layer", {}), dict) else {}
+        ocr_section: Dict[str, Any] = config_dict.get("ocr", {}) if isinstance(config_dict.get("ocr", {}), dict) else {}
+        render_section: Dict[str, Any] = config_dict.get("render", {}) if isinstance(config_dict.get("render", {}), dict) else {}
+        preprocess_section: Dict[str, Any] = config_dict.get("preprocess", {}) if isinstance(config_dict.get("preprocess", {}), dict) else {}
+        text_layer_section: Dict[str, Any] = config_dict.get("text_layer", {}) if isinstance(config_dict.get("text_layer", {}), dict) else {}
 
         ocr_config = OCRConfig(
             ocr_method=config_dict.get("ocr_method", ocr_section.get("ocr_method", "easyocr")),
@@ -125,6 +141,11 @@ class ConfigManager:
             fast_mode=config_dict.get("fast_mode", ocr_section.get("fast_mode", FAST_MODE)),
             fast_confidence_skip=config_dict.get("fast_confidence_skip", ocr_section.get("fast_confidence_skip", FAST_CONFIDENCE_SKIP)),
             tessdata_dir=config_dict.get("tessdata_dir", ocr_section.get("tessdata_dir")),
+            auto_append_eng_for_ben=config_dict.get("auto_append_eng_for_ben", ocr_section.get("auto_append_eng_for_ben", AUTO_APPEND_ENG_FOR_BEN)),
+            segment_retry_conf=config_dict.get("segment_retry_conf", ocr_section.get("segment_retry_conf", SEGMENT_RETRY_CONF)),
+            easyocr_fallback_conf=config_dict.get("easyocr_fallback_conf", ocr_section.get("easyocr_fallback_conf", EASYOCR_FALLBACK_CONF)),
+            easyocr_primary_conf=config_dict.get("easyocr_primary_conf", ocr_section.get("easyocr_primary_conf", EASYOCR_PRIMARY_CONF)),
+            tesseract_refine_min_chars=config_dict.get("tesseract_refine_min_chars", ocr_section.get("tesseract_refine_min_chars", TESSERACT_REFINE_MIN_CHARS)),
         )
         
         render_config = RenderConfig(
@@ -151,6 +172,16 @@ class ConfigManager:
             text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", text_layer_section.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS)),
         )
         
+        # RS correction configuration
+        rs_correction_section: Dict[str, Any] = config_dict.get("rs_correction", {}) if isinstance(config_dict.get("rs_correction", {}), dict) else {}
+        rs_correction_config = RSCorrectionConfig(
+            enabled=config_dict.get("rs_enabled", rs_correction_section.get("enabled", False)),
+            error_correction_bytes=max(1, config_dict.get("rs_error_correction_bytes", rs_correction_section.get("error_correction_bytes", 10))),
+            block_size=max(64, config_dict.get("rs_block_size", rs_correction_section.get("block_size", 1024))),
+            enable_correction=config_dict.get("rs_enable_correction", rs_correction_section.get("enable_correction", True)),
+            verify_only=config_dict.get("rs_verify_only", rs_correction_section.get("verify_only", False)),
+        )
+        
          # Support both input_path and pdf_path for backward compatibility
         input_path = config_dict.get("input_path", config_dict.get("pdf_path"))
         if input_path is None:
@@ -168,6 +199,7 @@ class ConfigManager:
             render=render_config,
             preprocess=preprocess_config,
             text_layer=text_layer_config,
+            rs_correction=rs_correction_config,
             max_workers=config_dict.get("max_workers"),
         )
     
@@ -176,7 +208,7 @@ class ConfigManager:
         # Reload environment variables to get the latest values
         self._env_vars = self._load_env_vars()
         
-        config_dict = {}
+        config_dict: Dict[str, Any] = {}
         
         if "input_path" in self._env_vars:
             config_dict["input_path"] = self._env_vars["input_path"]
@@ -209,6 +241,33 @@ class ConfigManager:
         
         if "tessdata_dir" in self._env_vars:
             config_dict["tessdata_dir"] = self._env_vars["tessdata_dir"]
+        
+        if "auto_append_eng_for_ben" in self._env_vars:
+            config_dict["auto_append_eng_for_ben"] = self._env_vars["auto_append_eng_for_ben"].lower() in ("true", "1", "yes")
+        
+        if "segment_retry_conf" in self._env_vars:
+            try:
+                config_dict["segment_retry_conf"] = float(self._env_vars["segment_retry_conf"])
+            except ValueError:
+                pass
+        
+        if "easyocr_fallback_conf" in self._env_vars:
+            try:
+                config_dict["easyocr_fallback_conf"] = float(self._env_vars["easyocr_fallback_conf"])
+            except ValueError:
+                pass
+        
+        if "easyocr_primary_conf" in self._env_vars:
+            try:
+                config_dict["easyocr_primary_conf"] = float(self._env_vars["easyocr_primary_conf"])
+            except ValueError:
+                pass
+        
+        if "tesseract_refine_min_chars" in self._env_vars:
+            try:
+                config_dict["tesseract_refine_min_chars"] = int(self._env_vars["tesseract_refine_min_chars"])
+            except ValueError:
+                pass
         
         if "zoom" in self._env_vars:
             try:
@@ -340,9 +399,9 @@ def get_config_manager() -> ConfigManager:
     return config_manager
 
 
-def create_job_config(input_path: str, output_root: str | None = None, **kwargs) -> JobConfig:
+def create_job_config(input_path: str, output_root: str | None = None, **kwargs: Any) -> JobConfig:
     """Create a new job configuration"""
-    config_dict = {
+    config_dict: Dict[str, Any] = {
         "input_path": input_path,
         "output_root": output_root or "",
         **kwargs
