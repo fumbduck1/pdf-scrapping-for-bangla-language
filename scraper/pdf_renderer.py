@@ -48,8 +48,8 @@ class PdfRenderer:
             os.makedirs(self.output_dir, exist_ok=True)
             self.renders_dir = os.path.join(self.output_dir, 'renders')
             os.makedirs(self.renders_dir, exist_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_error(f"Failed to create directories: {e}")
 
     def open_pdf(self):
         """Open the PDF into memory or file handle depending on size."""
