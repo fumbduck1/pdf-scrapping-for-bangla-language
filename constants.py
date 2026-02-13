@@ -39,3 +39,11 @@ class OCRSettings:
     ocr_method: str = "easyocr"
     ocr_lang: str = "ben"
     quality_mode: bool = QUALITY_MODE_DEFAULT
+
+
+# Reed-Solomon Error Correction Settings
+RS_ENABLED = False  # Enable Reed-Solomon error correction for OCR text
+RS_ERROR_CORRECTION_BYTES = 10  # Number of error correction bytes per block
+RS_BLOCK_SIZE = 1024  # Maximum block size for encoding/decoding
+RS_ENABLE_CORRECTION = True  # Enable automatic error correction during decoding
+RS_VERIFY_ONLY = False  # Only verify integrity without correcting errors

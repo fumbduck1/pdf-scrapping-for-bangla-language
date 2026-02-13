@@ -77,6 +77,16 @@ class TextLayerConfig:
 
 
 @dataclass
+class RSCorrectionConfig:
+    """Reed-Solomon error correction configuration"""
+    enabled: bool = False
+    error_correction_bytes: int = 10
+    block_size: int = 1024
+    enable_correction: bool = True
+    verify_only: bool = False
+
+
+@dataclass
 class JobConfig:
     """Complete job configuration"""
     input_path: str
@@ -86,6 +96,7 @@ class JobConfig:
     render: RenderConfig = field(default_factory=RenderConfig)
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     text_layer: TextLayerConfig = field(default_factory=TextLayerConfig)
+    rs_correction: RSCorrectionConfig = field(default_factory=RSCorrectionConfig)
     max_workers: Optional[int] = None
     
     @property
@@ -161,6 +172,16 @@ class ConfigManager:
             text_layer_min_ben_chars=config_dict.get("text_layer_min_ben_chars", text_layer_section.get("text_layer_min_ben_chars", TEXT_LAYER_MIN_BEN_CHARS)),
         )
         
+        # RS correction configuration
+        rs_correction_section: Dict[str, Any] = config_dict.get("rs_correction", {}) if isinstance(config_dict.get("rs_correction", {}), dict) else {}
+        rs_correction_config = RSCorrectionConfig(
+            enabled=config_dict.get("rs_enabled", rs_correction_section.get("enabled", False)),
+            error_correction_bytes=max(1, config_dict.get("rs_error_correction_bytes", rs_correction_section.get("error_correction_bytes", 10))),
+            block_size=max(64, config_dict.get("rs_block_size", rs_correction_section.get("block_size", 1024))),
+            enable_correction=config_dict.get("rs_enable_correction", rs_correction_section.get("enable_correction", True)),
+            verify_only=config_dict.get("rs_verify_only", rs_correction_section.get("verify_only", False)),
+        )
+        
          # Support both input_path and pdf_path for backward compatibility
         input_path = config_dict.get("input_path", config_dict.get("pdf_path"))
         if input_path is None:
@@ -178,6 +199,7 @@ class ConfigManager:
             render=render_config,
             preprocess=preprocess_config,
             text_layer=text_layer_config,
+            rs_correction=rs_correction_config,
             max_workers=config_dict.get("max_workers"),
         )
     

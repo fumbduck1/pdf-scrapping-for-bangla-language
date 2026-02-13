@@ -765,6 +765,12 @@ class PDFScraper:
         easyocr_fallback_conf=EASYOCR_FALLBACK_CONF,
         easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
         tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS,
+        # Reed-Solomon error correction parameters
+        rs_enabled=False,
+        rs_error_correction_bytes=10,
+        rs_block_size=1024,
+        rs_enable_correction=True,
+        rs_verify_only=False,
     ):
         """Initialize PDF scraper."""
         self.pdf_path = pdf_path
@@ -779,6 +785,21 @@ class PDFScraper:
         self.easyocr_fallback_conf = easyocr_fallback_conf
         self.easyocr_primary_conf = easyocr_primary_conf
         self.tesseract_refine_min_chars = tesseract_refine_min_chars
+        
+        # Reed-Solomon error correction parameters
+        self.rs_enabled = rs_enabled
+        self.rs_error_correction_bytes = rs_error_correction_bytes
+        self.rs_block_size = rs_block_size
+        self.rs_enable_correction = rs_enable_correction
+        self.rs_verify_only = rs_verify_only
+        self.rs_corrector = None
+        if self.rs_enabled:
+            try:
+                from rs_correction import RSTextCorrector
+                self.rs_corrector = RSTextCorrector(rs_error_correction_bytes)
+            except ImportError:
+                self.log_error("Reed-Solomon library not available")
+                self.rs_enabled = False
         self.ocr_lang = self.user_lang
         if self.auto_append_eng_for_ben:
             langs = split_langs(self.ocr_lang) or []
@@ -882,6 +903,12 @@ class PDFScraper:
             easyocr_fallback_conf=job_config.ocr.easyocr_fallback_conf,
             easyocr_primary_conf=job_config.ocr.easyocr_primary_conf,
             tesseract_refine_min_chars=job_config.ocr.tesseract_refine_min_chars,
+            # Reed-Solomon error correction parameters
+            rs_enabled=job_config.rs_correction.enabled,
+            rs_error_correction_bytes=job_config.rs_correction.error_correction_bytes,
+            rs_block_size=job_config.rs_correction.block_size,
+            rs_enable_correction=job_config.rs_correction.enable_correction,
+            rs_verify_only=job_config.rs_correction.verify_only,
         )
 
     def _build_ocr_pipeline(self):
@@ -1335,68 +1362,28 @@ class PDFScraper:
                 key=lambda p: p.get('page_number', 0)
             )
 
-            with open(os.path.join(self.output_dir, 'extracted_text.txt'), 'w', encoding='utf-8') as f:
-                f.write(f"File: {self.results['metadata']['filename']}\n")
-                f.write(f"Pages: {len(self.results['pages'])}\n")
-                f.write(f"OCR: {self.ocr_method}\n")
-                f.write(f"Language: {display_lang}\n")
-                f.write("=" * 80 + "\n")
-
-                for page_data in ordered_pages:
-                    page_num = page_data['page_number']
-                    f.write(f"\n----- PAGE {page_num + 1} -----\n")
-                    content = page_data.get('content', '') or ''
-                    f.write(content)
-                    f.write("\n")
-
-            with open(os.path.join(self.output_dir, 'extracted_text_continuous.txt'), 'w', encoding='utf-8') as f:
-                f.write(f"# {self.results['metadata']['filename']}\n")
-                f.write(f"# Extracted: {metadata.get('creation_date', '')[:19]}\n")
-                f.write(f"# Language: {display_lang} | Pages: {len(self.results['pages'])}\n\n")
-                for i, page_data in enumerate(ordered_pages):
-                    content = page_data.get('content', '') or ''
-                    if content.strip():
-                        if i > 0:
-                            f.write('\n\n')
-                        f.write(content.strip())
-
-            with open(os.path.join(self.output_dir, 'extracted_text_structured.txt'), 'w', encoding='utf-8') as f:
-                f.write(f"Document: {self.results['metadata']['filename']}\n")
-                f.write(f"Language: {display_lang}\n")
-                f.write(f"Total Pages: {len(self.results['pages'])}\n")
-                f.write(f"Processing Date: {metadata.get('creation_date', '')[:19]}\n")
-                f.write("\n" + "=" * 100 + "\n\n")
+            # Write text files - with or without Reed-Solomon correction
+            # Collect all page texts first
+            page_texts = []
+            for page_data in ordered_pages:
+                page_texts.append(page_data.get('content', '') or '')
+            
+            if self.rs_enabled and self.rs_corrector:
+                # Write RS-encoded binary files
+                # Encode and save each type of output
+                self._save_rs_encoded_text('extracted_text.txt', page_texts, ordered_pages, display_lang)
+                self._save_rs_encoded_text('extracted_text_continuous.txt', page_texts, ordered_pages, display_lang, continuous=True)
+                self._save_rs_encoded_text('extracted_text_structured.txt', page_texts, ordered_pages, display_lang, structured=True)
+                self._save_rs_encoded_sentences('extracted_text_sentences.txt', page_texts, ordered_pages, display_lang)
                 
-                for page_data in ordered_pages:
-                    page_num = page_data['page_number']
-                    content = page_data.get('content', '') or ''
-                    confidence = page_data.get('ocr_page_confidence', 0)
-                    fragments = page_data.get('ocr_page_fragments', 0)
-                    
-                    f.write(f"PAGE {page_num + 1}")
-                    if confidence > 0:
-                        f.write(f" [Confidence: {confidence:.3f}, Fragments: {fragments}]")
-                    f.write(f"\n{'-' * 50}\n")
-                    
-                    if content.strip():
-                        f.write(content)
-                        f.write("\n\n")
-                    else:
-                        f.write("[No text detected on this page]\n\n")
-
-            sentences_out = os.path.join(self.output_dir, 'extracted_text_sentences.txt')
-            with open(sentences_out, 'w', encoding='utf-8') as f:
-                f.write(f"Document: {self.results['metadata']['filename']}\n")
-                f.write(f"Language: {display_lang}\n")
-                f.write(f"Sentences/Clauses\n")
-                f.write(f"{'-' * 40}\n")
-                all_sentences = []
-                for page_data in ordered_pages:
-                    content = page_data.get('content', '') or ''
-                    all_sentences.extend(_sentence_chunks(content))
-                for sent in all_sentences:
-                    f.write(sent + "\n")
-
+                # Also save plain text files for compatibility
+                self._save_plain_text_files(page_texts, ordered_pages, display_lang)
+            else:
+                # Write plain text files
+                self._save_plain_text_files(page_texts, ordered_pages, display_lang)
+                
+            # Save extraction report (this should be outside RS-specific logic)
+            # Save extraction report
             with open(os.path.join(self.output_dir, 'extraction_report.txt'), 'w', encoding='utf-8') as f:
                 stats = self.results.get('statistics', {})
                 f.write(f"PDF EXTRACTION REPORT\n")
@@ -1426,12 +1413,199 @@ class PDFScraper:
             self.log("Saved: extracted_text_structured.txt (detailed)")
             self.log("Saved: extracted_text_sentences.txt (sentences/clauses)")
             self.log("Saved: extraction_report.txt (quality metrics)")
-            
             return True
+            
         except Exception as e:
             self.log(f"Save error: {str(e)}")
             self.log_error(f"Save error: {e}")
             return False
+
+    def _save_plain_text_files(self, page_texts, ordered_pages, display_lang):
+        """Save plain text files without Reed-Solomon correction."""
+        metadata = self.results['metadata']
+        
+        with open(os.path.join(self.output_dir, 'extracted_text.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"File: {self.results['metadata']['filename']}\n")
+            f.write(f"Pages: {len(self.results['pages'])}\n")
+            f.write(f"OCR: {self.ocr_method}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write("=" * 80 + "\n")
+
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                f.write(f"\n----- PAGE {page_num + 1} -----\n")
+                content = page_data.get('content', '') or ''
+                f.write(content)
+                f.write("\n")
+
+        with open(os.path.join(self.output_dir, 'extracted_text_continuous.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"# {self.results['metadata']['filename']}\n")
+            f.write(f"# Extracted: {metadata.get('creation_date', '')[:19]}\n")
+            f.write(f"# Language: {display_lang} | Pages: {len(self.results['pages'])}\n\n")
+            for i, page_data in enumerate(ordered_pages):
+                content = page_data.get('content', '') or ''
+                if content.strip():
+                    if i > 0:
+                        f.write('\n\n')
+                    f.write(content.strip())
+
+        with open(os.path.join(self.output_dir, 'extracted_text_structured.txt'), 'w', encoding='utf-8') as f:
+            f.write(f"Document: {self.results['metadata']['filename']}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write(f"Total Pages: {len(self.results['pages'])}\n")
+            f.write(f"Processing Date: {metadata.get('creation_date', '')[:19]}\n")
+            f.write("\n" + "=" * 100 + "\n\n")
+            
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                content = page_data.get('content', '') or ''
+                confidence = page_data.get('ocr_page_confidence', 0)
+                fragments = page_data.get('ocr_page_fragments', 0)
+                
+                f.write(f"PAGE {page_num + 1}")
+                if confidence > 0:
+                    f.write(f" [Confidence: {confidence:.3f}, Fragments: {fragments}]")
+                f.write(f"\n{'-' * 50}\n")
+                
+                if content.strip():
+                    f.write(content)
+                    f.write("\n\n")
+                else:
+                    f.write("[No text detected on this page]\n\n")
+
+        sentences_out = os.path.join(self.output_dir, 'extracted_text_sentences.txt')
+        with open(sentences_out, 'w', encoding='utf-8') as f:
+            f.write(f"Document: {self.results['metadata']['filename']}\n")
+            f.write(f"Language: {display_lang}\n")
+            f.write(f"Sentences/Clauses\n")
+            f.write(f"{'-' * 40}\n")
+            all_sentences = []
+            for page_data in ordered_pages:
+                content = page_data.get('content', '') or ''
+                all_sentences.extend(_sentence_chunks(content))
+            for sent in all_sentences:
+                f.write(sent + "\n")
+
+    def _save_rs_encoded_text(self, filename, page_texts, ordered_pages, display_lang, continuous=False, structured=False):
+        """Save RS-encoded text files."""
+        rs_filename = os.path.splitext(filename)[0] + '.rs'
+        output_path = os.path.join(self.output_dir, rs_filename)
+        
+        text_to_encode = ""
+        metadata = self.results['metadata']
+        
+        if continuous:
+            text_to_encode = f"# {metadata['filename']}\n"
+            text_to_encode += f"# Extracted: {metadata.get('creation_date', '')[:19]}\n"
+            text_to_encode += f"# Language: {display_lang} | Pages: {len(ordered_pages)}\n\n"
+            for i, page_data in enumerate(ordered_pages):
+                content = page_data.get('content', '') or ''
+                if content.strip():
+                    if i > 0:
+                        text_to_encode += '\n\n'
+                    text_to_encode += content.strip()
+        elif structured:
+            text_to_encode = f"Document: {metadata['filename']}\n"
+            text_to_encode += f"Language: {display_lang}\n"
+            text_to_encode += f"Total Pages: {len(ordered_pages)}\n"
+            text_to_encode += f"Processing Date: {metadata.get('creation_date', '')[:19]}\n"
+            text_to_encode += "\n" + "=" * 100 + "\n\n"
+            
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                content = page_data.get('content', '') or ''
+                confidence = page_data.get('ocr_page_confidence', 0)
+                fragments = page_data.get('ocr_page_fragments', 0)
+                
+                text_to_encode += f"PAGE {page_num + 1}"
+                if confidence > 0:
+                    text_to_encode += f" [Confidence: {confidence:.3f}, Fragments: {fragments}]"
+                text_to_encode += f"\n{'-' * 50}\n"
+                
+                if content.strip():
+                    text_to_encode += content
+                    text_to_encode += "\n\n"
+                else:
+                    text_to_encode += "[No text detected on this page]\n\n"
+        else:
+            text_to_encode = f"File: {metadata['filename']}\n"
+            text_to_encode += f"Pages: {len(ordered_pages)}\n"
+            text_to_encode += f"OCR: {self.ocr_method}\n"
+            text_to_encode += f"Language: {display_lang}\n"
+            text_to_encode += "=" * 80 + "\n"
+
+            for page_data in ordered_pages:
+                page_num = page_data['page_number']
+                text_to_encode += f"\n----- PAGE {page_num + 1} -----\n"
+                content = page_data.get('content', '') or ''
+                text_to_encode += content
+                text_to_encode += "\n"
+        
+        try:
+            self.rs_corrector.encode_and_save(text_to_encode, output_path)
+            self.log(f"Saved: {rs_filename} (RS-encoded)")
+        except Exception as e:
+            self.log_error(f"Error saving RS-encoded file {rs_filename}: {e}")
+
+    def _save_rs_encoded_sentences(self, filename, page_texts, ordered_pages, display_lang):
+        """Save RS-encoded sentences file."""
+        rs_filename = os.path.splitext(filename)[0] + '.rs'
+        output_path = os.path.join(self.output_dir, rs_filename)
+        
+        text_to_encode = f"Document: {self.results['metadata']['filename']}\n"
+        text_to_encode += f"Language: {display_lang}\n"
+        text_to_encode += f"Sentences/Clauses\n"
+        text_to_encode += f"{'-' * 40}\n"
+        
+        all_sentences = []
+        for page_data in ordered_pages:
+            content = page_data.get('content', '') or ''
+            all_sentences.extend(_sentence_chunks(content))
+        for sent in all_sentences:
+            text_to_encode += sent + "\n"
+        
+        try:
+            self.rs_corrector.encode_and_save(text_to_encode, output_path)
+            self.log(f"Saved: {rs_filename} (RS-encoded)")
+        except Exception as e:
+            self.log_error(f"Error saving RS-encoded sentences file {rs_filename}: {e}")
+
+    def _decode_rs_text_file(self, rs_filename):
+        """Decode and verify an RS-encoded text file."""
+        try:
+            text, errors_corrected, _ = self.rs_corrector.load_and_decode(rs_filename)
+            if errors_corrected:
+                self.log(f"Corrected {errors_corrected} errors in {rs_filename}")
+            return text
+        except Exception as e:
+            self.log_error(f"Error decoding RS file {rs_filename}: {e}")
+            return None
+
+    def _verify_rs_text_files(self):
+        """Verify all RS-encoded files in output directory."""
+        if not self.rs_enabled or not self.rs_corrector:
+            return
+        
+        self.log("Verifying RS-encoded files...")
+        rs_files = [f for f in os.listdir(self.output_dir) if f.endswith('.rs')]
+        
+        for rs_file in rs_files:
+            rs_path = os.path.join(self.output_dir, rs_file)
+            try:
+                with open(rs_path, 'rb') as f:
+                    encoded_bytes = f.read()
+                
+                is_intact, errors = self.rs_corrector.verify_text(encoded_bytes)
+                if is_intact:
+                    self.log(f"✓ {rs_file}: OK")
+                else:
+                    self.log(f"⚠ {rs_file}: {errors} errors detected")
+                    if self.rs_enable_correction and not self.rs_verify_only:
+                        self.log(f"   Attempting correction...")
+                        text, errors_corrected, _ = self.rs_corrector.decode_text(encoded_bytes)
+                        self.log(f"   Corrected {errors_corrected} errors")
+            except Exception as e:
+                self.log_error(f"Error verifying {rs_file}: {e}")
 
 
 from typing import Callable, Optional, TypedDict, Dict, Any
