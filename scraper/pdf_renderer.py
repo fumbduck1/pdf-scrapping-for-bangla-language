@@ -24,6 +24,22 @@ class PdfRenderer:
     _PENDING = object()
 
     def __init__(self, pdf_path, output_dir, pdf_bytes_cache_mb, poppler_path, log, log_error, persist_renders=False, render_cache_max_items=RENDER_CACHE_MAX_ITEMS):
+        """
+        Initialize the PdfRenderer and configure caching, persistence, and logging.
+        
+        Parameters:
+            pdf_path (str): Path to the source PDF file.
+            output_dir (str): Base directory for persisted outputs when persistence is enabled.
+            pdf_bytes_cache_mb (int | float): Maximum PDF size in megabytes to keep in memory; larger files will be accessed via a file handle.
+            poppler_path (str | None): Optional path to Poppler utilities (used to locate pdftoppm); if None, the system PATH is used.
+            log (callable | None): Optional logging callable for informational messages.
+            log_error (callable | None): Optional logging callable for error messages.
+            persist_renders (bool): If True, rendered page images will be persisted to disk under output_dir.
+            render_cache_max_items (int): Maximum number of rendered pages to keep in the in-memory LRU cache (0 disables the cache).
+        
+        Notes:
+            - Sets up internal state for PDF access (in-memory bytes vs file handle), a thread-safe bounded LRU render cache when enabled, and calls setup_directories() to prepare output paths if persistence is requested.
+        """
         self.pdf_path = pdf_path
         self.output_dir = output_dir
         self.renders_dir = None
@@ -45,6 +61,11 @@ class PdfRenderer:
         self.setup_directories()
 
     def setup_directories(self):
+        """
+        Create the output directory and a 'renders' subdirectory when render persistence is enabled.
+        
+        If `self.persist_renders` is True, ensures `self.output_dir` exists and sets `self.renders_dir` to the path of the `renders` subdirectory, creating it if necessary. On failure to create directories, reports the error via `self.log_error`.
+        """
         if not self.persist_renders:
             return
         try:
@@ -55,7 +76,14 @@ class PdfRenderer:
             self.log_error(f"Failed to create directories: {e}")
 
     def open_pdf(self):
-        """Open the PDF into memory or file handle depending on size."""
+        """
+        Open the PDF file either into memory or via a file handle based on the configured size threshold.
+        
+        If the file size is less than or equal to `pdf_bytes_cache_mb` the PDF is read into memory and `PdfReader` is initialized from those bytes; otherwise a file handle is opened and `PdfReader` is initialized from the handle. If the `pypdf` dependency is missing or an error occurs, resources are closed and the method returns failure.
+        
+        Returns:
+            bool: `True` on success, `False` on failure (including when `pypdf` is not installed).
+        """
         try:
             from pypdf import PdfReader
         except ImportError:
@@ -79,7 +107,21 @@ class PdfRenderer:
 
     @timer("pdf_rendering")
     def render_page(self, page_num, zoom, fmt="png"):
-        """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
+        """
+        Render a single PDF page to a PIL Image, optionally persist the output to disk and use an in-memory LRU cache.
+        
+        Parameters:
+            page_num (int): 0-based index of the page to render.
+            zoom (float): Scaling factor mapped to DPI (dpi = max(int(zoom * 72), 72)).
+            fmt (str): File format used when persisting the render (default "png").
+        
+        Returns:
+            PIL.Image.Image or (PIL.Image.Image, str | None) or None:
+                - A PIL Image containing the rendered page.
+                - When a cached entry is returned, a tuple (image, render_path) may be returned where `render_path`
+                  is the filesystem path to the persisted image or `None` if persistence failed or is disabled.
+                - `None` if rendering fails (missing poppler tools or other errors).
+        """
         
         # Check if we have a cached render (atomic operation)
         cache_key = (page_num, zoom, fmt)
@@ -225,6 +267,11 @@ class PdfRenderer:
             return None
 
     def cleanup_renders(self):
+        """
+        Remove the renderer output directory when persistence is disabled.
+        
+        If persistence is off and a renders directory exists, attempts to delete it and reports any failure via the configured error logger. Does nothing when persistence is enabled or no renders directory is present.
+        """
         if not self.persist_renders:
             import shutil
             if self.renders_dir and Path(self.renders_dir).exists():
@@ -234,6 +281,11 @@ class PdfRenderer:
                     self.log_error(f"Failed to clean up temporary renders: {e}")
 
     def close(self):
+        """
+        Release renderer resources.
+        
+        Closes the underlying PDF file handle if open and removes temporary render files; errors during file-handle closing are ignored.
+        """
         try:
             if self._pdf_file_handle:
                 self._pdf_file_handle.close()
@@ -243,6 +295,11 @@ class PdfRenderer:
         self.cleanup_renders()
 
     def _log_missing(self, msg, err_key=None):
+        """
+        Report a missing dependency or other error using the configured error callback.
+        
+        Call the instance's `log_error` callable with `msg` if provided; `err_key` may be used by callers to identify the class of error but is not used by this method. Any exceptions raised by the `log_error` callback are suppressed.
+        """
         if self.log_error:
             try:
                 self.log_error(msg)
@@ -250,6 +307,12 @@ class PdfRenderer:
                 pass
 
     def _log_error(self, msg):
+        """
+        Report an error message using the configured `log_error` callback, ignoring any exceptions raised by the callback.
+        
+        Parameters:
+            msg (str): The error message to report.
+        """
         if self.log_error:
             try:
                 self.log_error(msg)

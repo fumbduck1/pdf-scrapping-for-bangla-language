@@ -19,7 +19,18 @@ _ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
 
 
 def quantize_params(ocr_lang: str, fast_mode: bool) -> Tuple[int, bool]:
-    """Pick quantization levels/dither based on language mix and speed mode."""
+    """
+    Determine quantization color levels and whether to apply dithering based on the OCR language mix and speed mode.
+    
+    If the language parsing fails, no languages are assumed. When both Bengali ('ben') and English ('eng') are present the function favors mid-range levels and enables dithering; Bengali-only favors lower levels with dithering; English-only favors higher levels without dithering; otherwise a moderate level with dithering is chosen.
+    
+    Parameters:
+        ocr_lang (str): Language specifier string passed to split_langs.
+        fast_mode (bool): If True, choose lower-quality (faster) quantization levels.
+    
+    Returns:
+        Tuple[int, bool]: A pair (levels, dither) where `levels` is the number of quantization levels and `dither` is `True` if dithering should be applied, `False` otherwise.
+    """
     try:
         langs = split_langs(ocr_lang)
     except Exception:
@@ -146,7 +157,21 @@ def upscale_for_retry(image, scale=THIRD_PASS_SCALE):
 
 
 def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, quality_mode: bool, log_fn=None):
-    """Full preprocessing pipeline reused by both OCR engines."""
+    """
+    Run a full preprocessing pipeline on an image to prepare it for OCR.
+    
+    Performs optional downscaling to respect a global pixel cap, upscales small inputs, converts to grayscale, adjusts contrast and brightness based on image statistics and detected languages (e.g., Bengali "ben" or English "eng"), applies optional sharpening, and performs color quantization with optional dithering.
+    
+    Parameters:
+        image_or_path (PIL.Image.Image | str): A PIL Image or a filesystem path to an image.
+        ocr_lang (str): Language tags used to adjust processing (expects language codes such as "ben" and "eng").
+        fast_mode (bool): If true, skip heavier operations and use conservative defaults to speed processing.
+        quality_mode (bool): Optional flag for quality-oriented workflows (accepted but not required by all adjustments).
+        log_fn (callable|None): Optional function that accepts a single string for logging status and error messages.
+    
+    Returns:
+        PIL.Image.Image | None: The preprocessed grayscale PIL Image on success; if preprocessing fails and the input was a path, returns `None`; if preprocessing fails and the input was already a PIL Image, returns the original Image.
+    """
     try:
         img = image_or_path if isinstance(image_or_path, Image.Image) else Image.open(image_or_path)
         langs = split_langs(ocr_lang)

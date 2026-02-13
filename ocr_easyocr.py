@@ -10,6 +10,21 @@ from utils import split_langs
 
 
 def map_easyocr_langs(ocr_lang: str):
+    """
+    Normalize and expand an OCR language specification into a list of EasyOCR language codes.
+    
+    Splits the provided language string into identifiers, maps common variants to EasyOCR's codes
+    ('ben' or 'bn' -> 'bn', 'eng' or 'en' -> 'en'), lowercases other identifiers, and returns
+    ['en'] if no codes are produced.
+    
+    Parameters:
+        ocr_lang (str): A language specification string containing one or more language
+            identifiers (for example 'en', 'eng,fr', or 'ben').
+    
+    Returns:
+        list[str]: A list of EasyOCR language codes (e.g., ['en'], ['bn', 'fr']). Defaults to ['en']
+        when the input is empty or yields no valid codes.
+    """
     codes = []
     for code in split_langs(ocr_lang or ""):
         if code.lower() in ("ben", "bn"):
