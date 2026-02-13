@@ -164,6 +164,11 @@ class TestRenderCacheRaceCondition(unittest.TestCase):
             for t in threads:
                 t.join()
             
+            # Clean up mocks to avoid affecting other tests
+            import subprocess
+            from unittest.mock import patch
+            patch.stopall()
+            
             # Analyze the cache changes to detect race conditions
             print("\n=== Cache Operations Analysis ===")
             
@@ -178,14 +183,35 @@ class TestRenderCacheRaceCondition(unittest.TestCase):
                 elif method == '__getitem__' and args[0] == (0, 1.0, 'png'):
                     render_end += 1
                 elif method == '__setitem__' and args[0] == (0, 1.0, 'png'):
-                    # Only count actual renders, not placeholders
+                    # Only count actual renders, not placeholders or LRU moves
                     if isinstance(args[1], tuple) and len(args[1]) == 2 and isinstance(args[1][0], Image.Image):
-                        cache_set_operations += 1
+                        # Check if there was a pop() immediately before this setitem (which would indicate an LRU move)
+                        is_lru_move = False
+                        # Find all operations by this thread before timestamp
+                        thread_ops_before = [op for op in cache_changes if op[0] == thread_id and op[3] < timestamp]
+                        if thread_ops_before:
+                            last_op = thread_ops_before[-1]
+                            if last_op[1] == 'pop' and last_op[2][0] == (0, 1.0, 'png'):
+                                is_lru_move = True
+                        if not is_lru_move:
+                            cache_set_operations += 1
             
             print(f"Number of render attempts: {render_start}")
             print(f"Number of successful renders (from cache/memoization): {render_end}")
             print(f"Number of actual render invocations: {render_invocations}")
             print(f"Number of cache set operations: {cache_set_operations}")
+            
+            # Print all cache operations for debugging
+            print("\n=== All Cache Operations ===")
+            from collections import defaultdict
+            thread_ops = defaultdict(list)
+            for thread_id, method, args, timestamp in cache_changes:
+                thread_ops[thread_id].append((method, args))
+            
+            for thread_id, ops in thread_ops.items():
+                print(f"\nThread {thread_id} operations:")
+                for op, args in ops:
+                    print(f"  {op}({args})")
             
             # Assert that we have more render attempts than actual render invocations
             # (due to the placeholder mechanism preventing duplicate renders)

@@ -9,6 +9,8 @@ import threading
 import subprocess
 import sys
 import shutil
+import time
+import tempfile
 
 from constants import RENDER_CACHE_MAX_ITEMS
 from performance import timer
@@ -38,6 +40,7 @@ class PdfRenderer:
         # Page cache for rendered images (bounded LRU)
         self._render_cache = OrderedDict() if self.render_cache_max_items > 0 else None
         self._render_cache_lock = threading.Lock()
+        self._render_cache_condition = threading.Condition(lock=self._render_cache_lock)
         
         self.setup_directories()
 
@@ -77,22 +80,24 @@ class PdfRenderer:
     @timer("pdf_rendering")
     def render_page(self, page_num, zoom, fmt="png"):
         """Render a single page and return a PIL image; optionally persist to disk (with caching)."""
-        import time
         
         # Check if we have a cached render (atomic operation)
         cache_key = (page_num, zoom, fmt)
         if self._render_cache is not None:
             while True:
-                with self._render_cache_lock:
+                with self._render_cache_condition:
                     if cache_key in self._render_cache:
-                        cached_val = self._render_cache.pop(cache_key)
-                        self._render_cache[cache_key] = cached_val
+                        cached_val = self._render_cache[cache_key]
                         
                         if cached_val is self._PENDING:
-                            # Another thread is rendering this page, release lock and wait
-                            pass
+                            # Another thread is rendering this page, wait for notification
+                            self._render_cache_condition.wait()
+                            # After waiting, loop again to check the cache state
+                            continue
                         else:
-                            # Return cached value
+                            # Move to end only for actual cached values to maintain LRU behavior
+                            self._render_cache.pop(cache_key)
+                            self._render_cache[cache_key] = cached_val
                             return cached_val
                     else:
                         # If not in cache, add a placeholder to prevent duplicate renders
@@ -104,18 +109,15 @@ class PdfRenderer:
                             # Find and remove the oldest pending or actual entry
                             for key, value in list(self._render_cache.items()):
                                 if key != cache_key:  # Don't remove the entry we just added
-                                    _, old_value = self._render_cache.popitem(last=False)
-                                    if isinstance(old_value, tuple) and len(old_value) == 2 and hasattr(old_value[0], 'close'):
-                                        old_value[0].close()
+                                    removed_value = self._render_cache.pop(key)
+                                    if isinstance(removed_value, tuple) and len(removed_value) == 2 and hasattr(removed_value[0], 'close'):
+                                        removed_value[0].close()
                                     break
                         break
-                # Wait for a short time before retrying
-                time.sleep(0.01)
                 
         dpi = int((zoom or 7.0) * 72)
         dpi = max(dpi, 72)
         try:
-            import tempfile
             
             # Find pdftoppm executable with validation
             if self.poppler_path:
@@ -180,7 +182,7 @@ class PdfRenderer:
 
             # Cache the render (atomic operation)
             if self._render_cache is not None:
-                with self._render_cache_lock:
+                with self._render_cache_condition:
                     # Check if the entry is still our placeholder
                     if self._render_cache.get(cache_key) is self._PENDING:
                         # Replace placeholder with actual render
@@ -197,6 +199,8 @@ class PdfRenderer:
                         # If another thread already replaced the placeholder,
                         # use that instead of the one we just rendered
                         render_img.close()
+                    # Notify all waiting threads that the cache has been updated
+                    self._render_cache_condition.notify_all()
                         
             return render_img
             
@@ -204,16 +208,20 @@ class PdfRenderer:
             # Handle pdftoppm not found error
             self._log_missing(str(e), err_key="poppler")
             if self._render_cache is not None:
-                with self._render_cache_lock:
+                with self._render_cache_condition:
                     if self._render_cache.get(cache_key) is self._PENDING:
                         del self._render_cache[cache_key]
+                    # Notify all waiting threads that the pending entry has been removed
+                    self._render_cache_condition.notify_all()
             return None
         except Exception as e:
             self._log_error(f"Render failed (page {page_num + 1}): {e}")
             if self._render_cache is not None:
-                with self._render_cache_lock:
+                with self._render_cache_condition:
                     if self._render_cache.get(cache_key) is self._PENDING:
                         del self._render_cache[cache_key]
+                    # Notify all waiting threads that the pending entry has been removed
+                    self._render_cache_condition.notify_all()
             return None
 
     def cleanup_renders(self):
