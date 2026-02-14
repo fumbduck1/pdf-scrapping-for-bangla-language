@@ -227,7 +227,8 @@ class OcrPipeline:
             PIL.Image.Image or None: The opened PIL Image on success; logs an error and returns `None` if loading fails.
         """
         if isinstance(image_or_path, Image.Image):
-            return image_or_path
+            # Return a copy to prevent "Operation on closed image" errors
+            return image_or_path.copy()
             
         try:
             return Image.open(image_or_path)

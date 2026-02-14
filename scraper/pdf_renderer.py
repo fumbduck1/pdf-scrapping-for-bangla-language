@@ -3,7 +3,9 @@ from pathlib import Path
 from datetime import datetime
 from io import BytesIO
 from collections import OrderedDict
-from PIL import Image
+from PIL import Image, ImageFilter
+Image.MAX_IMAGE_PIXELS = 500_000_000
+_ = Image.MAX_IMAGE_PIXELS  # keep side-effect assignment visible to linters
 import os
 import threading
 import subprocess
@@ -139,9 +141,15 @@ class PdfRenderer:
                         else:
                             # Move to end only for actual cached values to maintain LRU behavior
                             self._render_cache.pop(cache_key)
+                            # Create a copy of the image before putting it back in cache
+                            # This ensures we never cache a closed image
+                            if isinstance(cached_val, tuple) and len(cached_val) == 2:
+                                cached_img, render_path = cached_val
+                                if isinstance(cached_img, Image.Image):
+                                    cached_img = cached_img.copy()
+                                cached_val = (cached_img, render_path)
                             self._render_cache[cache_key] = cached_val
                             # Return a copy of the image to prevent "Operation on closed image" errors
-                            # when the original is evicted from cache
                             if isinstance(cached_val, tuple) and len(cached_val) == 2:
                                 cached_img, render_path = cached_val
                                 if isinstance(cached_img, Image.Image):
@@ -157,9 +165,7 @@ class PdfRenderer:
                             # Find and remove the oldest pending or actual entry
                             for key, value in list(self._render_cache.items()):
                                 if key != cache_key:  # Don't remove the entry we just added
-                                    removed_value = self._render_cache.pop(key)
-                                    if isinstance(removed_value, tuple) and len(removed_value) == 2 and hasattr(removed_value[0], 'close'):
-                                        removed_value[0].close()
+                                    self._render_cache.pop(key)
                                     break
                         break
                 
@@ -236,13 +242,8 @@ class PdfRenderer:
                         # Replace placeholder with actual render
                         self._render_cache[cache_key] = (render_img, render_path)
                         if len(self._render_cache) > self.render_cache_max_items:
-                            # Explicitly close the oldest image before removing from cache
-                            _, old_value = self._render_cache.popitem(last=False)
-                            # Only try to close if we have an actual image (not PENDING)
-                            if isinstance(old_value, tuple) and len(old_value) == 2:
-                                old_img, _ = old_value
-                                if hasattr(old_img, 'close'):
-                                    old_img.close()
+                            # Remove the oldest image from cache (don't close it)
+                            self._render_cache.popitem(last=False)
                     else:
                         # If another thread already replaced the placeholder,
                         # use that instead of the one we just rendered
@@ -250,6 +251,8 @@ class PdfRenderer:
                     # Notify all waiting threads that the cache has been updated
                     self._render_cache_condition.notify_all()
                         
+            # Always return a copy of the image to ensure it remains accessible
+            # even if the cached version is closed
             return render_img.copy()
             
         except RuntimeError as e:

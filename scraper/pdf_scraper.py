@@ -155,15 +155,40 @@ class PDFScraper:
         self.use_ocr = use_ocr
         self.ocr_method = ocr_method
         self.persist_renders = bool(persist_renders)
-        self.ocr_lang = ocr_lang
-        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir)
-        self.quality_mode = quality_mode
+        self.max_workers_override = max_workers
+        self.user_lang = (ocr_lang or "ben").strip()
+        self.auto_append_eng_for_ben = auto_append_eng_for_ben
+        self.segment_retry_conf = segment_retry_conf
+        self.easyocr_fallback_conf = easyocr_fallback_conf
+        self.easyocr_primary_conf = easyocr_primary_conf
+        self.tesseract_refine_min_chars = tesseract_refine_min_chars
+        
+        # Reed-Solomon error correction parameters
+        self.rs_enabled = rs_enabled
+        self.rs_error_correction_bytes = rs_error_correction_bytes
+        self.rs_block_size = rs_block_size
+        self.rs_enable_correction = rs_enable_correction
+        self.rs_verify_only = rs_verify_only
+        self.rs_corrector = None
+        if self.rs_enabled:
+            try:
+                from rs_correction import RSTextCorrector
+                self.rs_corrector = RSTextCorrector(rs_error_correction_bytes)
+            except ImportError:
+                self.log_error("Reed-Solomon library not available")
+                self.rs_enabled = False
+        self.ocr_lang = self.user_lang
+        if self.auto_append_eng_for_ben:
+            langs = split_langs(self.ocr_lang) or []
+            if "ben" in langs and "eng" not in langs:
+                langs.append("eng")
+                self.ocr_lang = "+".join(langs)
+        self.quality_mode = bool(quality_mode)
         self.fast_mode = fast_mode
         self.fast_confidence_skip = fast_confidence_skip
-        self.pdf_bytes_cache_mb = pdf_bytes_cache_mb
-        self.zoom = zoom
-        self.high_dpi_zoom = high_dpi_zoom
+        self.page_render_zoom = zoom
         self.high_dpi_retry_conf = high_dpi_retry_conf
+        self.high_dpi_zoom = high_dpi_zoom
         self.header_footer_crop_pct = header_footer_crop_pct
         self.watermark_flatten = watermark_flatten
         self.watermark_clip_threshold = watermark_clip_threshold
@@ -174,30 +199,50 @@ class PDFScraper:
         self.text_layer_first = text_layer_first
         self.text_layer_lang_min_ratio = text_layer_lang_min_ratio
         self.text_layer_min_ben_chars = text_layer_min_ben_chars
-        self.render_cache_max_items = render_cache_max_items
-        self.share_ocr_instances = share_ocr_instances
-        self.ocr_pipeline_factory = ocr_pipeline_factory
-        self.auto_append_eng_for_ben = auto_append_eng_for_ben
-        self.segment_retry_conf = segment_retry_conf
-        self.easyocr_fallback_conf = easyocr_fallback_conf
-        self.easyocr_primary_conf = easyocr_primary_conf
-        self.tesseract_refine_min_chars = tesseract_refine_min_chars
-        self.rs_enabled = rs_enabled
-        self.rs_error_correction_bytes = rs_error_correction_bytes
-        self.rs_block_size = rs_block_size
-        self.rs_enable_correction = rs_enable_correction
-        self.rs_verify_only = rs_verify_only
-        
-        self.max_workers = max_workers
+        self.share_ocr_instances = bool(share_ocr_instances)
         self.progress_callback = progress_callback
         self.stop_event = stop_event
-        self.log = get_logger().info
-        self.log_error = get_logger().error
-        self._page_results = {}
-        self._page_count = 0
-        self.ocr = None
-        self._ocr_factory = self.ocr_pipeline_factory or self._build_ocr_pipeline
-        self.setup_directories()
+        self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir) if tessdata_dir else None
+        self.poppler_path = os.environ.get("POPPLER_PATH") or detect_poppler_path()
+        self.results = {
+            'metadata': {},
+            'pages': {},
+            'statistics': {},
+            'extraction_log': []
+        }
+        os.makedirs(self.output_dir, exist_ok=True)
+        from logger import get_logger
+        self.logger = get_logger()
+        
+        # Warn about potential memory issues with parallel processing and separate OCR instances
+        worker_count = self._worker_count()
+        if not self.share_ocr_instances and worker_count > 1:
+            warning_msg = (
+                "WARNING: share_ocr_instances is False and scraper is configured to run with "
+                f"{worker_count} workers. This will create {worker_count} separate OCR pipeline "
+                "instances (each with their own heavy EasyOCR reader), which may cause "
+                "significant memory usage and potential blowups. Consider setting share_ocr_instances=True "
+                "if you encounter memory issues during parallel processing."
+            )
+            if self.logger:
+                self.logger.warning(warning_msg)
+            # Also log to extraction log
+            self.results['extraction_log'].append(warning_msg)
+        
+        # Cache guardrail: cap or disable cache; allow overrides for testing/memory constraints
+        effective_cache_cap = max(int(render_cache_max_items or 0), 0)
+        self.renderer = PdfRenderer(
+            pdf_path=self.pdf_path,
+            output_dir=self.output_dir,
+            pdf_bytes_cache_mb=pdf_bytes_cache_mb,
+            poppler_path=self.poppler_path,
+            log=self.log,
+            log_error=self.log_error,
+            persist_renders=self.persist_renders,
+            render_cache_max_items=effective_cache_cap,
+        )
+        self._ocr_factory = ocr_pipeline_factory or self._build_ocr_pipeline
+        self.ocr = self._ocr_factory()
 
     @classmethod
     def from_job_config(cls, job_config: JobConfig, progress_callback=None, stop_event=None):
@@ -299,16 +344,26 @@ class PDFScraper:
             pass
 
     def _worker_count(self):
-        """
-        Choose an optimal number of worker processes for parallel OCR processing.
-        
-        Returns:
-            int: Number of workers to use; equals self.max_workers when set, otherwise uses the system CPU count minus one, with a minimum of 1.
-        """
+        """Optimized worker pool size for parallel OCR processing."""
         try:
-            return self.max_workers or (os.cpu_count() or 4) - 1
+            if getattr(self, "max_workers", None) is not None:
+                override = self.max_workers
+                if isinstance(override, (int, float)) and not isinstance(override, bool):
+                    return max(1, int(override))
+                elif isinstance(override, str) and override.strip().isdigit():
+                    return max(1, int(override.strip()))
+            cores = os.cpu_count() or 2
+            langs = split_langs(self.ocr_lang) if hasattr(self, 'ocr_lang') else []
+            has_ben = "ben" in langs
+            if has_ben:
+                max_workers = max(2, min(cores - 1, 4))
+            else:
+                max_workers = max(2, min(cores, 8))
+            if self.quality_mode if hasattr(self, 'quality_mode') else False:
+                max_workers = max(2, max_workers // 2)
+            return max_workers
         except Exception:
-            return 1
+            return 2
 
     def _ensure_tesseract_cmd(self):
         """Make sure pytesseract points to a real tesseract binary."""
@@ -348,29 +403,50 @@ class PDFScraper:
 
     def log(self, message):
         """Log message."""
-        pass
+        self.results['extraction_log'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        if self.progress_callback:
+            self.progress_callback(message)
+        if hasattr(self, 'logger') and self.logger:
+            try:
+                self.logger.info(message)
+            except Exception:
+                pass
 
     def log_error(self, message):
         """Persist errors to errors.log so they remain visible after the UI advances."""
-        pass
+        try:
+            path = os.path.join(self.output_dir, "errors.log")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {message}\n")
+        except Exception:
+            pass
+        if hasattr(self, 'logger') and self.logger:
+            try:
+                self.logger.error(message)
+            except Exception:
+                pass
 
     def open_pdf(self):
-        """
-        Initialize the PDF renderer for the configured PDF file and determine the document's total page count.
-        
-        This creates and opens a PdfRenderer assigned to `self.renderer`. If PyPDF is available and the renderer exposes a parsed document, the method sets `self._page_count` to the number of pages.
-        """
-        self.renderer = PdfRenderer(
-            self.pdf_path, self.output_dir, self.pdf_bytes_cache_mb, detect_poppler_path(),
-            self.log, self.log_error, self.persist_renders, self.render_cache_max_items
-        )
-        self.renderer.open_pdf()
-
-        from deps import _lazy_import_pypdf
-        PdfReader, pypdf_available = _lazy_import_pypdf()
-        
-        if pypdf_available and self.renderer.doc:
-            self._page_count = len(self.renderer.doc.pages)
+        """Open PDF document."""
+        ok = self.renderer.open_pdf()
+        if not ok:
+            return False
+        self.doc = self.renderer.doc
+        try:
+            page_count = len(self.doc.pages) if self.doc and hasattr(self.doc, 'pages') else 0
+            size_mb = round(os.path.getsize(self.pdf_path) / (1024 * 1024), 2)
+        except Exception:
+            page_count = 0
+            size_mb = 0
+        self.results['metadata'] = {
+            'filename': Path(self.pdf_path).name,
+            'pages': page_count,
+            'creation_date': datetime.now().isoformat(),
+            'file_size_mb': size_mb
+        }
+        self.log(f"Opened: {self.results['metadata']['filename']}")
+        return True
 
     def preprocess_image_for_ocr(self, image_path):
         """
@@ -397,43 +473,90 @@ class PDFScraper:
         """
         if self.renderer:
             if zoom is None:
-                zoom = self.zoom
+                zoom = self.page_render_zoom
             return self.renderer.render_page(page_num, zoom)
         return None
 
     @timer("page_processing")
     def _process_page_with_ocr(self, page_num):
-        """
-        Process a single PDF page by rendering it to an image, running OCR, and returning the structured result.
+        """Optimized page processing with intelligent retry logic and error recovery."""
+        if self.stop_event and self.stop_event.is_set():
+            return page_num, None
+
+        render_img = None
+        render_path = None
+        page_level_ocr = None
+        ocr_engine = self._get_ocr_pipeline()
         
-        On success returns a PageResult with the 1-based page_number, extracted text and OCR metadata (confidence, fragments, and method). If rendering or OCR fails, returns a PageResult with the 1-based page_number and an error message.
-        """
-        img = self.render_page_to_image(page_num)
-        
-        if img is None:
-            return PageResult(
-                page_number=page_num + 1,
-                error="Rendering failed"
-            )
+        try:
+            render_result = self.render_page_to_image(page_num)
+            if not render_result:
+                return page_num, PageResult(
+                    page_number=page_num,
+                    content="",
+                    warning='Rendering unavailable; raster OCR skipped',
+                )
+            if isinstance(render_result, tuple):
+                render_img, render_path = render_result
+            else:
+                render_img = render_result
+                render_path = None
             
-        ocr_result = self._get_ocr_pipeline().extract_text_with_ocr(img)
-        
-        if ocr_result:
-            page_result = PageResult(
-                page_number=page_num + 1,
-                content=ocr_result.get('text', ''),
-                ocr_page_text=ocr_result.get('text', ''),
-                ocr_page_confidence=ocr_result.get('confidence', 0.0),
-                ocr_page_fragments=ocr_result.get('fragments', 0),
-                ocr_render=ocr_result.get('method', 'unknown')
-            )
-        else:
-            page_result = PageResult(
-                page_number=page_num + 1,
-                error="OCR failed"
-            )
+            page_level_ocr = ocr_engine.extract_text_with_ocr(render_img)
             
-        return page_result
+            if page_level_ocr:
+                confidence = page_level_ocr.get('avg_confidence', 0)
+                text_length = len(page_level_ocr.get('text', '').strip())
+                needs_retry = (
+                    confidence < self.high_dpi_retry_conf or
+                    (text_length < 50 and confidence < 0.9)
+                )
+                
+                if needs_retry and not self.fast_mode:
+                    try:
+                        hi_render = self.render_page_to_image(page_num, zoom=self.high_dpi_zoom)
+                        if hi_render:
+                            if isinstance(hi_render, tuple):
+                                hi_img, hi_path = hi_render
+                            else:
+                                hi_img, hi_path = hi_render, None
+
+                            hi_ocr = ocr_engine.extract_text_with_ocr(hi_img)
+                            if self._score_result(hi_ocr) > self._score_result(page_level_ocr):
+                                page_level_ocr = hi_ocr
+                                render_img = hi_img
+                                render_path = hi_path
+                                self.log(f"[Page {page_num + 1}] High-DPI retry improved results")
+                            if hi_path and hi_path != render_path and os.path.exists(hi_path):
+                                try:
+                                    os.remove(hi_path)
+                                except Exception:
+                                    pass
+                    except Exception as retry_err:
+                        self.log(f"[Page {page_num + 1}] High-DPI retry failed: {retry_err}")
+
+            page_text = page_level_ocr['text'] if page_level_ocr else ""
+            page_data = PageResult(
+                page_number=page_num,
+                content=page_text,
+                ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+            )
+
+            return page_num, page_data
+            
+        except Exception as e:
+            error_msg = f"Page {page_num + 1} processing error: {e}"
+            self.log(error_msg)
+            self.log_error(error_msg)
+            
+            return page_num, PageResult(
+                page_number=page_num,
+                content="",
+                error=str(e),
+            )
 
     def _normalize_text(self, text):
         """
@@ -482,6 +605,33 @@ class PDFScraper:
             int: The chosen Tesseract PSM value.
         """
         return preproc.choose_psm(image, segment_count)
+
+    def _score_result(self, res):
+        """Enhanced scoring algorithm for OCR result comparison."""
+        return ocr_t.score_result(res)
+
+    def _run_tesseract_pass(self, image, extra_config=None, extra_dilate=False, psm=None):
+        """Run one Tesseract pass on a PIL image with optional extra dilation and config."""
+        return ocr_t.run_tesseract_pass(
+            image,
+            ocr_lang=self.ocr_lang,
+            quality_mode=self.quality_mode,
+            psm=psm,
+            extra_config=extra_config,
+            extra_dilate=extra_dilate,
+            log=self.log,
+            log_error=self.log_error,
+        )
+    
+    def _get_easyocr_reader(self):
+        """Delegate to OCR pipeline's _get_easyocr_reader method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._get_easyocr_reader()
+    
+    def _run_easyocr_pass(self, image):
+        """Delegate to OCR pipeline's _run_easyocr_pass method."""
+        ocr_engine = self._get_ocr_pipeline()
+        return ocr_engine._run_easyocr_pass(image)
 
     def _extract_text_layer(self, page):
         """
@@ -554,52 +704,116 @@ class PDFScraper:
 
     @timer("page_processing")
     def scrape_all_pages(self):
-        """
-        Orchestrates OCR processing for every page of the opened PDF and stores per-page results.
+        """Scrape all pages with optional parallel OCR per page."""
+        if not self.open_pdf():
+            return False
         
-        Processes pages (possibly in parallel) and populates self._page_results with a PageResult for each page. When configured, a shared OCR pipeline is created and reused. Reports progress via self.progress_callback if provided, respects self.stop_event to cancel outstanding work, logs per-page errors and records an error PageResult for failed pages, and ensures the PDF renderer is closed when finished.
-        """
-        self.open_pdf()
-        
-        if self._page_count == 0:
-            self.log_error("Could not determine page count")
-            return
-            
-        self.log(f"Processing {self._page_count} pages")
-        
-        if self.share_ocr_instances:
-            self.ocr = self._build_ocr_pipeline()
-            
         try:
-            worker_count = self._worker_count()
-            
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_to_page = {
-                    executor.submit(self._process_page_with_ocr, page_num): page_num
-                    for page_num in range(self._page_count)
-                }
+            if not self.doc or not hasattr(self.doc, 'pages'):
+                return False
                 
-                for future in as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    
+            total_pages = len(self.doc.pages)
+            page_results = {}
+            ocr_futures = []
+
+            with ThreadPoolExecutor(max_workers=self._worker_count()) as executor:
+                for page_num in range(total_pages):
                     if self.stop_event and self.stop_event.is_set():
-                        executor.shutdown(wait=False, cancel_futures=True)
+                        self.log("Stop requested; aborting remaining pages")
                         break
-                        
+
+                    # Calculate and report progress
+                    progress = ((page_num + 1) / total_pages) * 100
+                    if self.progress_callback:
+                        try:
+                            self.progress_callback(progress)
+                        except Exception as e:
+                            self.log(f"Error in progress callback: {str(e)}")
+                    page_text = ""
+                    page_level_ocr = None
+                    render_path = None
+
                     try:
-                        result = future.result()
-                        self._page_results[page_num] = result
-                        
-                        if self.progress_callback:
-                            self.progress_callback((page_num + 1) / self._page_count * 100)
-                            
-                    except Exception as e:
-                        self.log_error(f"Page {page_num + 1} processing failed: {e}")
-                        self._page_results[page_num] = PageResult(
-                            page_number=page_num + 1,
-                            error=f"Processing failed: {e}"
-                        )
-                        
+                        page = self.doc.pages[page_num]
+
+                        if self.text_layer_first:
+                            langs = split_langs(self.ocr_lang) or []
+                            text_layer = self._extract_text_layer(page)
+                            if text_layer and len(text_layer) > 5:
+                                use_text_layer = False
+                                if "ben" in langs:
+                                    ratio, ben_count = self._bangla_ratio(text_layer)
+                                    use_text_layer = (
+                                        ratio >= self.text_layer_lang_min_ratio
+                                        and ben_count >= self.text_layer_min_ben_chars
+                                    )
+                                    if not use_text_layer:
+                                        self.log(
+                                            f"[Page {page_num + 1}] Text layer rejected (ben ratio {ratio:.2f}, chars {ben_count}); running OCR"
+                                        )
+                                else:
+                                    use_text_layer = True
+
+                                if use_text_layer:
+                                    page_text = text_layer
+                                    self.log(f"[Page {page_num + 1}] Used PDF text layer; OCR skipped")
+
+                        if not page_text:
+                            future = executor.submit(self._process_page_with_ocr, page_num)
+                            ocr_futures.append(future)
+                            continue
+
+                    except Exception as page_err:
+                        self.log(f"Page {page_num + 1} OCR error: {page_err}")
+                        try:
+                            print(f"Page {page_num + 1} OCR error: {page_err}", file=sys.stderr)
+                        except Exception:
+                            pass
+                        try:
+                            self.log_error(f"Page {page_num + 1} OCR error: {page_err}")
+                        except Exception:
+                            pass
+                        page_text = ""
+                        page_level_ocr = None
+
+                    preview_len = len(page_text)
+                    self.log(f"[Page {page_num + 1}] OCR complete (chars: {preview_len})")
+
+                    page_results[page_num] = PageResult(
+                        page_number=page_num + 1,
+                        content=page_text,
+                        ocr_page_text=page_level_ocr.get('text', '') if page_level_ocr else "",
+                        ocr_page_confidence=page_level_ocr.get('avg_confidence', 0.0) if page_level_ocr else 0.0,
+                        ocr_page_fragments=page_level_ocr.get('fragments', 0) if page_level_ocr else 0,
+                        ocr_render=os.path.relpath(render_path, self.output_dir) if render_path else "",
+                    )
+
+                for fut in as_completed(ocr_futures):
+                    try:
+                        page_num, page_data = fut.result()
+                    except Exception as err:
+                        self.log(f"Parallel OCR error: {err}")
+                        continue
+                    if page_data is None:
+                        continue
+
+                    page_results[page_num] = PageResult(
+                        page_number=page_data.page_number + 1,
+                        content=page_data.content,
+                        ocr_page_text=page_data.ocr_page_text,
+                        ocr_page_confidence=page_data.ocr_page_confidence,
+                        ocr_page_fragments=page_data.ocr_page_fragments,
+                        ocr_render=page_data.ocr_render,
+                        warning=page_data.warning,
+                        error=page_data.error
+                    )
+                    preview_len = len(page_data.content)
+                    self.log(f"[Page {page_num + 1}] OCR complete (chars: {preview_len})")
+
+            # Save results
+            self._page_results = page_results
+            return True
+
         finally:
             if self.renderer:
                 self.renderer.close()

@@ -159,7 +159,11 @@ class MinimalGUI:
     def _drain_events(self):
         try:
             while True:
-                event = self.event_queue.get_nowait()
+                try:
+                    event = self.event_queue.get_nowait()
+                except queue.Empty:
+                    break  # No more events to process
+                
                 kind = event.get("kind")
                 if kind == "status":
                     self.status_var.set(event.get("message", ""))
