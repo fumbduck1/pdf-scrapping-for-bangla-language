@@ -16,7 +16,7 @@ from deps import _lazy_import_epublib, EPUBLIB_AVAILABLE, EASYOCR_AVAILABLE, TES
 
 # Lazy import for ebooklib to prevent ImportError when module not installed
 epub: Any = None
-from scraper import PageResult
+from scraper_old import PageResult
 from logger import get_logger
 
 
@@ -140,7 +140,7 @@ class EPUBScraper:
         self.logger = get_logger()
         
         # Initialize OCR pipeline
-        from scraper import OcrPipeline
+        from scraper_old import OcrPipeline
         from constants import (
             FAST_CONFIDENCE_SKIP,
             HEADER_FOOTER_CROP_PCT,
