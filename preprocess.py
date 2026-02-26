@@ -3,6 +3,8 @@ from typing import Tuple
 
 from PIL import Image, ImageEnhance, ImageFilter
 
+from logger import warning
+
 from constants import (
     HEADER_FOOTER_CROP_PCT,
     WATERMARK_CLIP_THRESHOLD,
@@ -236,19 +238,20 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
             q_levels, q_dither = quantize_params(ocr_lang, fast_mode)
             if q_levels and q_levels > 0:
                 try:
-                    method = getattr(Image, "MEDIANCUT", 1)
+                    method = getattr(Image, "MEDIANCUT", 0)
                     dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
                     quantized = img.quantize(colors=q_levels, method=method, dither=dither)
                     img = quantized.convert('L')
                     if has_ben and not fast_mode:
                         img = img.filter(ImageFilter.MedianFilter(size=3))
-                except Exception:
+                except Exception as e:
+                    warning(f"Failed to quantize image with MEDIANCUT method: {e}")
                     try:
                         method = getattr(Image, "FASTOCTREE", 2)
                         dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
                         img = img.quantize(colors=q_levels, method=method, dither=dither).convert('L')
-                    except Exception:
-                        pass
+                    except Exception as e2:
+                        warning(f"Failed to quantize image with FASTOCTREE fallback method: {e2}")
 
         return img
     except Exception as e:
