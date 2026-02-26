@@ -92,33 +92,12 @@ class EPUBScraper:
         persist_renders=False,
         max_workers=None,
         fast_mode=False,
-        # Reed-Solomon error correction parameters
-        rs_enabled=False,
-        rs_error_correction_bytes=10,
-        rs_block_size=1024,
-        rs_enable_correction=True,
-        rs_verify_only=False,
         **kwargs
     ):
         """Initialize EPUB scraper."""
         self.epub_path = epub_path
         self.output_dir = output_dir
         self.use_ocr = use_ocr
-        
-        # Reed-Solomon error correction parameters
-        self.rs_enabled = rs_enabled
-        self.rs_error_correction_bytes = rs_error_correction_bytes
-        self.rs_block_size = rs_block_size
-        self.rs_enable_correction = rs_enable_correction
-        self.rs_verify_only = rs_verify_only
-        self.rs_corrector = None
-        if self.rs_enabled:
-            try:
-                from rs_correction import RSTextCorrector
-                self.rs_corrector = RSTextCorrector(rs_error_correction_bytes)
-            except ImportError:
-                self.log_error("Reed-Solomon library not available")
-                self.rs_enabled = False
         self.ocr_method = ocr_method
         self.persist_renders = bool(persist_renders)
         self.max_workers_override = max_workers
@@ -178,12 +157,6 @@ class EPUBScraper:
             tessdata_dir=job_config.ocr.tessdata_dir,
             progress_callback=progress_callback,
             stop_event=stop_event,
-            # Reed-Solomon error correction parameters
-            rs_enabled=job_config.rs_correction.enabled,
-            rs_error_correction_bytes=job_config.rs_correction.error_correction_bytes,
-            rs_block_size=job_config.rs_correction.block_size,
-            rs_enable_correction=job_config.rs_correction.enable_correction,
-            rs_verify_only=job_config.rs_correction.verify_only,
         )
     
     def log(self, message):
@@ -450,37 +423,14 @@ class EPUBScraper:
     def save_results(self):
         """Save scraping results to output directory."""
         try:
-            # Save text content - with or without Reed-Solomon correction
-            if self.rs_enabled and self.rs_corrector:
-                text_output_path = os.path.join(self.output_dir, "content.txt")
-                rs_output_path = os.path.join(self.output_dir, "content.rs")
-                
-                # Collect and write plain text file
-                with open(text_output_path, "w", encoding="utf-8") as f:
-                    # Sort pages by numeric order (extract integer from page key like "page_123")
-                    for page_key in sorted(self.results['pages'].keys(), key=lambda k: int(k.split('_')[1])):
-                        page = self.results['pages'][page_key]
-                        f.write(f"=== Page {page_key} ===\n")
-                        f.write(page.get('content', '') + "\n\n")
-                
-                # Encode and save RS-encoded version
-                text_to_encode = ""
+            # Save text content
+            text_output_path = os.path.join(self.output_dir, "content.txt")
+            with open(text_output_path, "w", encoding="utf-8") as f:
+                # Sort pages by numeric order (extract integer from page key like "page_123")
                 for page_key in sorted(self.results['pages'].keys(), key=lambda k: int(k.split('_')[1])):
                     page = self.results['pages'][page_key]
-                    text_to_encode += f"=== Page {page_key} ===\n"
-                    text_to_encode += page.get('content', '') + "\n\n"
-                
-                self.rs_corrector.encode_and_save(text_to_encode, rs_output_path)
-                self.log(f"Saved: content.rs (RS-encoded)")
-            else:
-                # Save plain text only
-                text_output_path = os.path.join(self.output_dir, "content.txt")
-                with open(text_output_path, "w", encoding="utf-8") as f:
-                    # Sort pages by numeric order (extract integer from page key like "page_123")
-                    for page_key in sorted(self.results['pages'].keys(), key=lambda k: int(k.split('_')[1])):
-                        page = self.results['pages'][page_key]
-                        f.write(f"=== Page {page_key} ===\n")
-                        f.write(page.get('content', '') + "\n\n")
+                    f.write(f"=== Page {page_key} ===\n")
+                    f.write(page.get('content', '') + "\n\n")
             
             # Save metadata
             metadata_output_path = os.path.join(self.output_dir, "metadata.txt")
