@@ -1,5 +1,14 @@
 from dataclasses import dataclass
 
+# Lightweight/consumer preset defaults
+LITE_ZOOM = 5.0  # lower render scale to cut DPI cost
+LITE_HIGH_DPI_ZOOM = 8.0  # single fallback zoom when confidence is weak
+LITE_HIGH_DPI_RETRY_CONF = 0.9  # retry only when clearly low confidence
+LITE_RENDER_CACHE_MAX_ITEMS = 4  # keep cache small for low-memory systems
+LITE_MAX_WORKERS = 4  # bound thread fan-out on consumer hardware
+LITE_TEXT_LAYER_LANG_MIN_RATIO = 0.25  # prefer native text layer when adequate
+LITE_TEXT_LAYER_MIN_BEN_CHARS = 8
+
 DEFAULT_ZOOM = 7.0  # fixed render scale to avoid heavy DPI cost
 FAST_MODE = False  # prefer accuracy over speed for Bangla-heavy docs
 FAST_CONFIDENCE_SKIP = 0.92  # skip second OCR pass only when very strong
@@ -29,6 +38,23 @@ MAX_OCR_PIXELS = 12_000_000
 # Render cache guardrail to cap in-memory raster storage
 RENDER_CACHE_MAX_ITEMS = 12
 
+# Named presets for config application
+LITE_PRESET = {
+    "zoom": LITE_ZOOM,
+    "high_dpi_zoom": LITE_HIGH_DPI_ZOOM,
+    "high_dpi_retry_conf": LITE_HIGH_DPI_RETRY_CONF,
+    "render_cache_max_items": LITE_RENDER_CACHE_MAX_ITEMS,
+    "max_workers": LITE_MAX_WORKERS,
+    "text_layer_lang_min_ratio": LITE_TEXT_LAYER_LANG_MIN_RATIO,
+    "text_layer_min_ben_chars": LITE_TEXT_LAYER_MIN_BEN_CHARS,
+    "fast_mode": True,
+    "quality_mode": True,
+    "watermark_flatten": False,
+    "quantize_levels": 28,
+    "quantize_dither": False,
+    "third_pass_scale": 1.0,
+}
+
 # EasyOCR-first defaults and refinement thresholds
 EASYOCR_PRIMARY_CONF = 0.94  # when below, ask Tesseract to refine segment
 TESSERACT_REFINE_MIN_CHARS = 32  # if text is very short, try Tesseract to fill gaps
@@ -39,11 +65,6 @@ class OCRSettings:
     ocr_method: str = "easyocr"
     ocr_lang: str = "ben"
     quality_mode: bool = QUALITY_MODE_DEFAULT
+    preset: str = "default"
 
 
-# Reed-Solomon Error Correction Settings
-RS_ENABLED = False  # Enable Reed-Solomon error correction for OCR text
-RS_ERROR_CORRECTION_BYTES = 10  # Number of error correction bytes per block
-RS_BLOCK_SIZE = 1024  # Maximum block size for encoding/decoding
-RS_ENABLE_CORRECTION = True  # Enable automatic error correction during decoding
-RS_VERIFY_ONLY = False  # Only verify integrity without correcting errors

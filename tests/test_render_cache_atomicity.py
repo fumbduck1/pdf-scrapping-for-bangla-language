@@ -7,7 +7,7 @@ import time
 import os
 import tempfile
 from PIL import Image
-from scraper import PdfRenderer
+from scraper_old import PdfRenderer
 from unittest import mock
 
 
@@ -37,7 +37,7 @@ def run_concurrent_renders(renderer, num_threads, num_pages, delay=0.01):
     
     def worker():
         thread_results = []
-        with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+        with mock.patch("deps.check_pdftoppm_available", return_value=True), \
              mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             for page_num in range(num_pages):
                 start_time = time.time()
@@ -145,8 +145,8 @@ class TestRenderCacheAtomicity(unittest.TestCase):
                 result.stdout = ppm_data
                 result.stderr = b""
                 return result
-                
-            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+
+            with mock.patch("deps.check_pdftoppm_available", return_value=True), \
                  mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for page_num in range(max_cache_size):
                     renderer.render_page(page_num, 1.0)
@@ -158,7 +158,7 @@ class TestRenderCacheAtomicity(unittest.TestCase):
             
             # Now render newer pages in single thread
             for page_num in range(max_cache_size, max_cache_size + 2):
-                with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+                with mock.patch("deps.check_pdftoppm_available", return_value=True), \
                      mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                     renderer.render_page(page_num, 1.0)
             

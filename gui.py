@@ -9,7 +9,7 @@ from config_manager import create_job_config
 from constants import QUALITY_MODE_DEFAULT, OCRSettings
 from utils import validate_runtime_env, check_tesseract_ready, summarize_env
 from deps import EASYOCR_AVAILABLE, TESSERACT_AVAILABLE
-from scraper import run_pdf_job
+from scraper_old import run_pdf_job
 class MinimalGUI:
     def __init__(self, root):
         self.root = root
@@ -25,6 +25,7 @@ class MinimalGUI:
         self.lang_var = tk.StringVar(value="ben")
         self.quality_var = tk.BooleanVar(value=QUALITY_MODE_DEFAULT)
         self.speed_var = tk.BooleanVar(value=False)
+        self.lite_var = tk.BooleanVar(value=False)
         self.persist_var = tk.BooleanVar(value=False)
         self.event_queue = queue.Queue()
         
@@ -92,6 +93,7 @@ class MinimalGUI:
         ttk.Checkbutton(ocr_frame, text="Quality mode (slower, cleaner)", variable=self.quality_var, command=self._on_quality_toggle).pack(side=tk.LEFT, padx=8)
         ttk.Checkbutton(ocr_frame, text="Speed mode (skip extra retries)", variable=self.speed_var, command=self._on_speed_toggle).pack(side=tk.LEFT, padx=8)
         ttk.Checkbutton(ocr_frame, text="Save renders (debug)", variable=self.persist_var).pack(side=tk.LEFT, padx=8)
+        ttk.Checkbutton(ocr_frame, text="Lite (EasyOCR only, low resource)", variable=self.lite_var, command=self._on_lite_toggle).pack(side=tk.LEFT, padx=8)
         lang_frame = ttk.Frame(step3)
         lang_frame.pack(fill=tk.X, pady=5)
         ttk.Label(lang_frame, text="Language:").pack(side=tk.LEFT)
@@ -187,9 +189,17 @@ class MinimalGUI:
     def _on_speed_toggle(self):
         if self.speed_var.get():
             self.quality_var.set(False)
+            self.lite_var.set(True)
 
     def _on_quality_toggle(self):
         if self.quality_var.get():
+            self.speed_var.set(False)
+
+    def _on_lite_toggle(self):
+        if self.lite_var.get():
+            # Lite implies EasyOCR-only and low resource; keep quality on by default
+            self.speed_var.set(False)
+        else:
             self.speed_var.set(False)
 
     def run_env_check(self):
@@ -241,12 +251,15 @@ class MinimalGUI:
             # Non-blocking warnings (e.g., Tesseract missing for refinement)
             messagebox.showwarning("Warning", w)
             self.log(w)
-        ok, msg = check_tesseract_ready()
-        if ok:
-            self.log("Engine: EasyOCR primary; Tesseract refines weak text")
-            self.log(msg)
+        if self.lite_var.get():
+            self.log("Engine: EasyOCR only (lite mode)")
         else:
-            self.log("Engine: EasyOCR primary; Tesseract unavailable, skipping refinement")
+            ok, msg = check_tesseract_ready()
+            if ok:
+                self.log("Engine: EasyOCR primary; Tesseract refines weak text")
+                self.log(msg)
+            else:
+                self.log("Engine: EasyOCR primary; Tesseract unavailable, skipping refinement")
         self.log(f"EasyOCR available: {EASYOCR_AVAILABLE}")
         self.log(f"Python: {sys.executable}")
 
@@ -272,6 +285,7 @@ class MinimalGUI:
             ocr_method='easyocr',
             ocr_lang=self.lang_var.get() or 'ben',
             quality_mode=quality_choice,
+            preset="lite" if self.lite_var.get() else "default",
         )
         self.log(f"Files selected: {len(self.pdf_files)}")
         self.log(f"Output dir: {self.output_dir}")
@@ -289,6 +303,7 @@ class MinimalGUI:
             job_config = create_job_config(
                 input_path=file_path,
                 output_root=self.output_dir,
+                preset=settings.preset,
                 use_ocr=settings.use_ocr,
                 ocr_method=settings.ocr_method,
                 ocr_lang=settings.ocr_lang,
@@ -315,7 +330,7 @@ class MinimalGUI:
             # Determine file type and run appropriate scraper
             file_ext = Path(file_path).suffix.lower()
             if file_ext == '.pdf':
-                from scraper import run_pdf_job
+                from scraper_old import run_pdf_job
                 result = run_pdf_job(job_config, self.stop_event, progress_callback)
             elif file_ext == '.epub':
                 from epub_scraper import run_epub_job

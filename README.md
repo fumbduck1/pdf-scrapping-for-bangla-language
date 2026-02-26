@@ -13,6 +13,7 @@ This project is a comprehensive PDF scraping tool that uses OCR (Optical Charact
 - **Multi-threading**: Parallel processing for faster document processing
 - **GUI and CLI**: Both graphical and command-line interfaces available
 - **Configurable**: Support for environment variables, config files, and command-line parameters
+- **Lite preset**: EasyOCR-only, low-resource mode with bounded threads and single high-DPI retry
 
 ## Installation
 
@@ -71,6 +72,7 @@ Options:
 - `--lang`: OCR language (default: ben)
 - `--quality`: Enable quality mode (slower, cleaner)
 - `--fast`: Enable fast mode (skip extra retries)
+- `--preset`: `default` (full pipeline) or `lite` (EasyOCR-only, low resource)
 - `--tessdata-dir`: Custom tessdata directory for Tesseract
 - `--persist-renders`: Save rendered page images for debugging
 - `--max-workers`: Override worker pool size
@@ -93,6 +95,7 @@ PDF_SCRAPER_OCR_LANG=ben+eng
 PDF_SCRAPER_QUALITY_MODE=true
 PDF_SCRAPER_PERSIST_RENDERS=false
 PDF_SCRAPER_MAX_WORKERS=4
+PDF_SCRAPER_PRESET=lite
 ```
 
 ### Configuration File
@@ -137,6 +140,10 @@ You can also use a JSON or YAML configuration file:
   "max_workers": 4
 }
 ```
+
+### Lite preset
+
+Use the lite preset when you want a consumer-friendly run: single EasyOCR engine, lower render DPI (zoom 5 with one high-DPI retry), small render cache, and bounded workers. Enable via `--preset lite`, `PDF_SCRAPER_PRESET=lite`, or the GUI “Lite” checkbox.
 ## Troubleshooting Guide
 
 ### Common Issues

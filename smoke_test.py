@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 from config_manager import create_job_config
-from scraper import run_pdf_job
+from scraper_old import run_pdf_job
 from utils import validate_runtime_env
 
 def main():

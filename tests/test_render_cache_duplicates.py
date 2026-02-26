@@ -5,7 +5,7 @@ import unittest
 import threading
 import time
 from PIL import Image
-from scraper import PdfRenderer
+from scraper_old import PdfRenderer
 from unittest import mock
 
 
@@ -28,7 +28,7 @@ def run_stress_test(renderer, num_threads, iterations):
     
     def worker():
         thread_results = []
-        with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+        with mock.patch("deps.check_pdftoppm_available", return_value=True), \
              mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             for _ in range(iterations):
                 start_time = time.time()
@@ -118,7 +118,7 @@ class TestRenderCacheDuplicates(unittest.TestCase):
             return result
             
         def worker(page_num):
-            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+            with mock.patch("deps.check_pdftoppm_available", return_value=True), \
                  mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for _ in range(20):
                     renderer.render_page(page_num, 1.0)

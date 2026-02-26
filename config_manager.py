@@ -8,6 +8,7 @@ from constants import (
     DEFAULT_ZOOM,
     FAST_MODE,
     FAST_CONFIDENCE_SKIP,
+    LITE_PRESET,
     TEXT_LAYER_FIRST,
     TEXT_LAYER_LANG_MIN_RATIO,
     TEXT_LAYER_MIN_BEN_CHARS,
@@ -27,6 +28,7 @@ from constants import (
     EASYOCR_FALLBACK_CONF,
     EASYOCR_PRIMARY_CONF,
     TESSERACT_REFINE_MIN_CHARS,
+    RENDER_CACHE_MAX_ITEMS,
 )
 
 
@@ -54,6 +56,7 @@ class RenderConfig:
     high_dpi_retry_conf: float = HIGH_DPI_RETRY_CONF
     pdf_bytes_cache_mb: int = PDF_BYTES_CACHE_MB
     persist_renders: bool = False
+    render_cache_max_items: int = RENDER_CACHE_MAX_ITEMS
 
 
 @dataclass
@@ -77,26 +80,17 @@ class TextLayerConfig:
 
 
 @dataclass
-class RSCorrectionConfig:
-    """Reed-Solomon error correction configuration"""
-    enabled: bool = False
-    error_correction_bytes: int = 10
-    block_size: int = 1024
-    enable_correction: bool = True
-    verify_only: bool = False
-
-
-@dataclass
 class JobConfig:
     """Complete job configuration"""
     input_path: str
     output_root: str
     use_ocr: bool = True
+    preset: str = "default"
+    lite_mode: bool = False
     ocr: OCRConfig = field(default_factory=OCRConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     text_layer: TextLayerConfig = field(default_factory=TextLayerConfig)
-    rs_correction: RSCorrectionConfig = field(default_factory=RSCorrectionConfig)
     max_workers: Optional[int] = None
     
     @property
@@ -136,7 +130,7 @@ class ConfigManager:
         """
         Builds a JobConfig from a flat or nested configuration dictionary.
         
-        Accepts either top-level keys or nested sections ("ocr", "render", "preprocess", "text_layer", "rs_correction"). Recognizes legacy "pdf_path" as an alias for "input_path" and coerces the resulting input path to a string. Requires "output_root" to be present in the provided dictionary.
+        Accepts either top-level keys or nested sections ("ocr", "render", "preprocess", "text_layer"). Recognizes legacy "pdf_path" as an alias for "input_path" and coerces the resulting input path to a string. Requires "output_root" to be present in the provided dictionary.
         
         Parameters:
             config_dict (Dict[str, Any]): Configuration values; section keys may contain the same option names as top-level keys (top-level keys take precedence).
@@ -148,6 +142,7 @@ class ConfigManager:
         render_section: Dict[str, Any] = config_dict.get("render", {}) if isinstance(config_dict.get("render", {}), dict) else {}
         preprocess_section: Dict[str, Any] = config_dict.get("preprocess", {}) if isinstance(config_dict.get("preprocess", {}), dict) else {}
         text_layer_section: Dict[str, Any] = config_dict.get("text_layer", {}) if isinstance(config_dict.get("text_layer", {}), dict) else {}
+        preset_name = (config_dict.get("preset") or "default").lower()
 
         ocr_config = OCRConfig(
             ocr_method=config_dict.get("ocr_method", ocr_section.get("ocr_method", "easyocr")),
@@ -169,6 +164,7 @@ class ConfigManager:
             high_dpi_retry_conf=config_dict.get("high_dpi_retry_conf", render_section.get("high_dpi_retry_conf", HIGH_DPI_RETRY_CONF)),
             pdf_bytes_cache_mb=config_dict.get("pdf_bytes_cache_mb", render_section.get("pdf_bytes_cache_mb", PDF_BYTES_CACHE_MB)),
             persist_renders=config_dict.get("persist_renders", render_section.get("persist_renders", False)),
+            render_cache_max_items=config_dict.get("render_cache_max_items", render_section.get("render_cache_max_items", RENDER_CACHE_MAX_ITEMS)),
         )
         
         preprocess_config = PreprocessConfig(
@@ -188,15 +184,6 @@ class ConfigManager:
         )
         
         # RS correction configuration
-        rs_correction_section: Dict[str, Any] = config_dict.get("rs_correction", {}) if isinstance(config_dict.get("rs_correction", {}), dict) else {}
-        rs_correction_config = RSCorrectionConfig(
-            enabled=config_dict.get("rs_enabled", rs_correction_section.get("enabled", False)),
-            error_correction_bytes=max(1, config_dict.get("rs_error_correction_bytes", rs_correction_section.get("error_correction_bytes", 10))),
-            block_size=max(64, config_dict.get("rs_block_size", rs_correction_section.get("block_size", 1024))),
-            enable_correction=config_dict.get("rs_enable_correction", rs_correction_section.get("enable_correction", True)),
-            verify_only=config_dict.get("rs_verify_only", rs_correction_section.get("verify_only", False)),
-        )
-        
          # Support both input_path and pdf_path for backward compatibility
         input_path = config_dict.get("input_path", config_dict.get("pdf_path"))
         if input_path is None:
@@ -206,17 +193,19 @@ class ConfigManager:
         if not isinstance(input_path, str):
             input_path = str(input_path)
             
-        return JobConfig(
+        job = JobConfig(
             input_path=input_path,
             output_root=config_dict["output_root"],
             use_ocr=config_dict.get("use_ocr", True),
+            preset=preset_name,
             ocr=ocr_config,
             render=render_config,
             preprocess=preprocess_config,
             text_layer=text_layer_config,
-            rs_correction=rs_correction_config,
             max_workers=config_dict.get("max_workers"),
+            lite_mode=preset_name == "lite",
         )
+        return self.apply_preset(job)
     
     def from_env(self) -> JobConfig:
         """
@@ -317,6 +306,9 @@ class ConfigManager:
         
         if "persist_renders" in self._env_vars:
             config_dict["persist_renders"] = self._env_vars["persist_renders"].lower() in ("true", "1", "yes")
+
+        if "preset" in self._env_vars:
+            config_dict["preset"] = self._env_vars["preset"]
         
         if "max_workers" in self._env_vars:
             try:
@@ -332,6 +324,43 @@ class ConfigManager:
             config_dict["output_root"] = ""
         
         return self.from_dict(config_dict)
+
+    def apply_preset(self, config: JobConfig) -> JobConfig:
+        """Apply named presets to a JobConfig instance."""
+        preset = (config.preset or "default").lower()
+        if preset != "lite":
+            return config
+
+        # Force lightweight settings for consumer devices
+        config.lite_mode = True
+        config.ocr.ocr_method = "easyocr"
+        config.ocr.fast_mode = True
+        config.ocr.quality_mode = True
+        config.ocr.fast_confidence_skip = max(config.ocr.fast_confidence_skip, 0.9)
+        config.ocr.segment_retry_conf = 0.0  # disable heavy per-segment retries
+        config.ocr.easyocr_primary_conf = min(config.ocr.easyocr_primary_conf, 0.92)
+        config.ocr.easyocr_fallback_conf = 0.0
+        config.ocr.tesseract_refine_min_chars = 9999  # effectively disable tesseract refine paths
+
+        config.render.zoom = LITE_PRESET["zoom"]
+        config.render.high_dpi_zoom = LITE_PRESET["high_dpi_zoom"]
+        config.render.high_dpi_retry_conf = LITE_PRESET["high_dpi_retry_conf"]
+        config.render.persist_renders = False
+        config.render.pdf_bytes_cache_mb = min(config.render.pdf_bytes_cache_mb, 64)
+        config.render.render_cache_max_items = LITE_PRESET["render_cache_max_items"]
+
+        config.preprocess.watermark_flatten = LITE_PRESET["watermark_flatten"]
+        config.preprocess.quantize_levels = LITE_PRESET["quantize_levels"]
+        config.preprocess.quantize_dither = LITE_PRESET["quantize_dither"]
+        config.preprocess.third_pass_scale = LITE_PRESET["third_pass_scale"]
+
+        config.text_layer.text_layer_first = True
+        config.text_layer.text_layer_lang_min_ratio = LITE_PRESET["text_layer_lang_min_ratio"]
+        config.text_layer.text_layer_min_ben_chars = LITE_PRESET["text_layer_min_ben_chars"]
+
+        # Bound worker count and render cache size
+        config.max_workers = config.max_workers or LITE_PRESET["max_workers"]
+        return config
     
     def from_file(self, config_path: str) -> JobConfig:
         """Load configuration from file (JSON or YAML)"""
@@ -396,6 +425,9 @@ class ConfigManager:
         
         if config.render.pdf_bytes_cache_mb <= 0:
             errors.append("PDF bytes cache size must be positive")
+
+        if config.render.render_cache_max_items < 0:
+            errors.append("Render cache size cannot be negative")
         
         return errors
     

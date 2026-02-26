@@ -5,7 +5,7 @@ import unittest
 import threading
 import time
 from PIL import Image
-from scraper import PdfRenderer
+from scraper_old import PdfRenderer
 from unittest import mock
 
 
@@ -67,7 +67,7 @@ class TestRenderCacheConcurrency(unittest.TestCase):
             return result
             
         def worker():
-            with mock.patch("scraper.check_pdftoppm_available", return_value=True), \
+              with mock.patch("deps.check_pdftoppm_available", return_value=True), \
                  mock.patch("subprocess.run", side_effect=mock_subprocess_run):
                 for page_num in range(num_pages):
                     renderer.render_page(page_num, 1.0)

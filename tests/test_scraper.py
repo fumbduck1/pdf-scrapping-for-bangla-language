@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config_manager import JobConfig, OCRConfig, RenderConfig
-from scraper import PdfRenderer, OcrPipeline, PDFScraper
+from scraper_old import PdfRenderer, OcrPipeline, PDFScraper
 from deps import PDF2IMAGE_AVAILABLE, PYPDF_AVAILABLE
 from PIL import Image
 from unittest import mock
@@ -177,7 +177,7 @@ class TestRendererCache(unittest.TestCase):
 
         renderer._pdf_bytes = b"%PDF-1.4"  # force in-memory PDF path
 
-        with mock.patch("scraper.check_pdftoppm_available", side_effect=mock_check_pdftoppm_available), \
+        with mock.patch("deps.check_pdftoppm_available", side_effect=mock_check_pdftoppm_available), \
              mock.patch("subprocess.run", side_effect=mock_subprocess_run):
             renderer.render_page(0, 1.0)
             renderer.render_page(1, 1.0)

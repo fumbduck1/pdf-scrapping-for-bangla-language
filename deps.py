@@ -348,15 +348,19 @@ def _lazy_import_epublib():
     """
     global epub_lib, epublib_available
     if epub_lib is not None:
+        # Keep the exported availability flag in sync after first successful import
+        globals()["EPUBLIB_AVAILABLE"] = True
         return epub_lib
     try:
         from ebooklib import epub
         epub_lib = epub
         epublib_available = True
+        globals()["EPUBLIB_AVAILABLE"] = True
     except ImportError as e:
         print(f"EPUB library import error: {e}")
         epub_lib = None
         epublib_available = False
+        globals()["EPUBLIB_AVAILABLE"] = False
     return epub_lib
 
 # Initialize on module import

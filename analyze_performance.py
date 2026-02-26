@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config_manager import create_job_config
-from scraper import run_pdf_job, JobResult
+from scraper_old import run_pdf_job, JobResult
 from performance import get_monitor, print_performance_report
 
 

@@ -156,7 +156,7 @@ def upscale_for_retry(image, scale=THIRD_PASS_SCALE):
         return image
 
 
-def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, quality_mode: bool, log_fn=None):
+def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, quality_mode: bool, log_fn=None, lite_mode: bool = False):
     """
     Run a full preprocessing pipeline on an image to prepare it for OCR.
     
@@ -196,6 +196,8 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
                 scale_factor = max(2, 1200 // img.width)
             else:
                 scale_factor = max(2, 900 // img.width)
+            if lite_mode:
+                scale_factor = min(scale_factor, 2)
             new_size = (img.width * scale_factor, img.height * scale_factor)
             img = img.resize(new_size, Image.Resampling.LANCZOS)
 
@@ -224,28 +226,29 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
         brightness_enhancer = ImageEnhance.Brightness(img)
         img = brightness_enhancer.enhance(brightness_boost)
 
-        if not fast_mode:
+        if not fast_mode and not lite_mode:
             if has_ben:
                 img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=2))
             else:
                 img = img.filter(ImageFilter.SHARPEN)
 
-        q_levels, q_dither = quantize_params(ocr_lang, fast_mode)
-        if q_levels and q_levels > 0:
-            try:
-                method = getattr(Image, "MEDIANCUT", 1)
-                dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
-                quantized = img.quantize(colors=q_levels, method=method, dither=dither)
-                img = quantized.convert('L')
-                if has_ben and not fast_mode:
-                    img = img.filter(ImageFilter.MedianFilter(size=3))
-            except Exception:
+        if not lite_mode:
+            q_levels, q_dither = quantize_params(ocr_lang, fast_mode)
+            if q_levels and q_levels > 0:
                 try:
-                    method = getattr(Image, "FASTOCTREE", 2)
+                    method = getattr(Image, "MEDIANCUT", 1)
                     dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
-                    img = img.quantize(colors=q_levels, method=method, dither=dither).convert('L')
+                    quantized = img.quantize(colors=q_levels, method=method, dither=dither)
+                    img = quantized.convert('L')
+                    if has_ben and not fast_mode:
+                        img = img.filter(ImageFilter.MedianFilter(size=3))
                 except Exception:
-                    pass
+                    try:
+                        method = getattr(Image, "FASTOCTREE", 2)
+                        dither = Image.Dither.FLOYDSTEINBERG if q_dither else Image.Dither.NONE
+                        img = img.quantize(colors=q_levels, method=method, dither=dither).convert('L')
+                    except Exception:
+                        pass
 
         return img
     except Exception as e:

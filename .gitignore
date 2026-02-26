@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 .env
 tests\__pycache__
+logs/
+
 # Project outputs and logs
 output/
 performance_output/

@@ -391,7 +391,7 @@ def run_smoke_test():
     # Try to import the main module
     try:
         import deps
-        import scraper
+        import scraper_old as scraper
         import preprocess
         
         # Test dependency detection
