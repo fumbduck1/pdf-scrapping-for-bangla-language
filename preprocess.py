@@ -1,5 +1,5 @@
 """Image preprocessing utilities for OCR pipelines."""
-from typing import Tuple
+from typing import Tuple, Optional
 
 from PIL import Image, ImageEnhance, ImageFilter
 
@@ -13,6 +13,13 @@ from constants import (
 )
 from deps import _lazy_import_numpy
 np = _lazy_import_numpy()
+
+# Optional import for enhanced watermark detection
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 from utils import split_langs
 
 # Allow large images; defer overall cap to caller if needed.
@@ -79,6 +86,147 @@ def flatten_background(image, clip=WATERMARK_CLIP_THRESHOLD):
         return img.point(lambda p: 255 if p >= clip else p)
     except Exception:
         return image
+
+
+def detect_watermark_regions(image, watermark_confidence_threshold: float = 0.6) -> Optional:
+    """
+    Detect potential watermark regions using edge detection and frequency analysis.
+
+    Returns a PIL Image mask where watermark-likely regions are white (255).
+    Returns None if detection is not available or fails.
+    """
+    try:
+        if np is None:
+            return None
+
+        # Convert to numpy array if PIL Image
+        if isinstance(image, Image.Image):
+            arr = np.array(image.convert('L'))
+        else:
+            arr = np.array(image)
+            if len(arr.shape) == 3:
+                arr = (arr[:,:,0] * 0.3 + arr[:,:,1] * 0.59 + arr[:,:,2] * 0.11).astype(np.uint8)
+
+        # Try to use cv2 for edge detection, fallback if not available
+        try:
+            # Canny edge detection to find text-like structures
+            if cv2 is not None:
+                blurred = cv2.GaussianBlur(arr, (3, 3), 0)
+                edges = cv2.Canny(blurred, 50, 150)
+            else:
+                raise ImportError("cv2 not available")
+        except (ImportError, AttributeError, Exception):
+            # Fallback: use numpy-based edge detection (Sobel)
+            try:
+                from scipy import ndimage
+                edges = ndimage.sobel(arr).astype(np.uint8)
+                edges = (edges > 0).astype(np.uint8) * 255
+            except ImportError:
+                # No edge detection available
+                return None
+
+        # Frequency analysis: detect repetitive patterns
+        # If same regions appear at regular intervals, likely watermark
+        h, w = edges.shape
+
+        # Horizontal projection: find columns with consistent edges
+        h_proj = (edges > 0).sum(axis=0)
+
+        # Look for regular spacing (watermark repeats)
+        if h_proj.max() > 0:
+            normalized_proj = h_proj / h_proj.max()
+
+            # Simple peak detection - if you see consistent peaks, likely watermark pattern
+            peaks = (normalized_proj > 0.3).astype(np.uint8)
+            peak_diff = np.diff(peaks)
+
+            # Count transitions (from low to high)
+            transitions = np.sum(np.abs(peak_diff)) // 2
+
+            # If >5 regular transitions, likely a watermark pattern
+            watermark_likelihood = min(1.0, transitions / 5.0)
+        else:
+            watermark_likelihood = 0.0
+
+        # Create mask: regions with high edge density + watermark pattern
+        mask = edges.copy()
+
+        # Apply morphological closing to connect nearby edges
+        try:
+            if cv2 is not None:
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            else:
+                raise ImportError("cv2 not available")
+        except (Exception, AttributeError):
+            # Fallback: use scipy
+            try:
+                from scipy import ndimage
+                mask = ndimage.binary_closing(mask > 0, structure=np.ones((3,3))).astype(np.uint8) * 255
+            except ImportError:
+                pass
+
+        # Threshold: only high-confidence watermark regions
+        if watermark_likelihood >= watermark_confidence_threshold:
+            return Image.fromarray(mask)
+
+        return None
+
+    except Exception as e:
+        warning(f"Watermark detection failed: {e}")
+        return None
+
+
+def apply_adaptive_watermark_removal(image, watermark_mask: Optional = None, flip_background_threshold: int = 200) -> Image.Image:
+    """
+    Apply adaptive watermark removal using bilateral filtering on detected watermark regions.
+
+    For watermarked regions: use bilateral filter (smooths while preserving edges)
+    For content regions: preserve detail with sharpening
+    """
+    try:
+        if watermark_mask is None:
+            # If no mask, apply standard flatten
+            return flatten_background(image, clip=flip_background_threshold)
+
+        # Convert to array
+        if isinstance(image, Image.Image):
+            arr = np.array(image.convert('L'))
+        else:
+            arr = np.array(image)
+            if len(arr.shape) == 3:
+                arr = (arr[:,:,0] * 0.3 + arr[:,:,1] * 0.59 + arr[:,:,2] * 0.11).astype(np.uint8)
+
+        # Convert mask to array
+        mask_arr = np.array(watermark_mask.convert('L')) if isinstance(watermark_mask, Image.Image) else np.array(watermark_mask)
+        mask_arr = (mask_arr > 127).astype(np.uint8)  # Binary mask
+
+        # Apply bilateral filtering to watermark regions (soften + preserve edges)
+        try:
+            if cv2 is not None:
+                filtered = cv2.bilateralFilter(arr, 9, 75, 75)
+            else:
+                raise ImportError("cv2 not available")
+        except (ImportError, AttributeError):
+            # Fallback: use median filter
+            from PIL import ImageFilter as IF
+            filtered = np.array(Image.fromarray(arr).filter(IF.MedianFilter(size=3)))
+
+        # Blend: weighted combination of original and filtered
+        result = arr.copy()
+        result[mask_arr > 0] = 0.4 * arr[mask_arr > 0] + 0.6 * filtered[mask_arr > 0]
+        result = result.astype(np.uint8)
+
+        # Apply background flattening
+        result = result.copy()
+        result[result >= flip_background_threshold] = 255
+
+        return Image.fromarray(result)
+
+    except Exception as e:
+        warning(f"Adaptive watermark removal failed: {e}")
+        return flatten_background(image, clip=flip_background_threshold)
+
 
 
 def estimate_density(image) -> float:
@@ -205,6 +353,13 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
 
         img = img.convert('L')
 
+        # Layer 1: Detect potential watermark regions for better handling
+        watermark_mask = None
+        if quality_mode and not fast_mode and not lite_mode:
+            watermark_mask = detect_watermark_regions(img)
+            if watermark_mask and log_fn:
+                log_fn("Detected potential watermark regions")
+
         if np is not None and not fast_mode:
             arr = np.array(img)
             brightness = float(arr.mean())
@@ -227,6 +382,14 @@ def preprocess_image_for_ocr(image_or_path, ocr_lang: str, fast_mode: bool, qual
         img = contrast_enhancer.enhance(contrast_boost)
         brightness_enhancer = ImageEnhance.Brightness(img)
         img = brightness_enhancer.enhance(brightness_boost)
+
+        # Layer 2: Apply adaptive watermark removal for detected regions
+        # Use lower threshold (200) for dark watermarks instead of 245
+        if watermark_mask is not None:
+            img = apply_adaptive_watermark_removal(img, watermark_mask, flip_background_threshold=200)
+        else:
+            # Standard watermark flattening if no mask detected
+            img = flatten_background(img, clip=WATERMARK_CLIP_THRESHOLD)
 
         if not fast_mode and not lite_mode:
             if has_ben:
@@ -267,6 +430,8 @@ __all__ = [
     "preprocess_image_for_ocr",
     "crop_header_footer",
     "flatten_background",
+    "detect_watermark_regions",
+    "apply_adaptive_watermark_removal",
     "maybe_split_columns",
     "estimate_density",
     "choose_psm",

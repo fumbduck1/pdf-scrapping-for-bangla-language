@@ -19,6 +19,10 @@ PDF_BYTES_CACHE_MB = 80  # cap for in-memory caching to reuse bytes for renderin
 WATERMARK_FLATTEN = True  # if True, clip faint backgrounds before OCR
 WATERMARK_CLIP_THRESHOLD = 245  # luminance threshold for clipping to white (Bangla: stronger flatten)
 WATERMARK_RETRY_CONF = 0.82  # rerun on flattened background if below this
+# Enhanced watermark detection for dark watermarks
+WATERMARK_DETECTION_CONFIDENCE = 0.6  # Threshold for considering text as watermark (0-1)
+WATERMARK_ADAPTIVE_THRESHOLD = 200  # Luminance threshold for adaptive watermark removal (lower than 245 for dark watermarks)
+WATERMARK_FREQUENCY_THRESHOLD = 2  # Minimum page appearances to mark as watermark
 HIGH_DPI_RETRY_CONF = 0.92  # rerender at higher zoom when below this confidence
 HIGH_DPI_ZOOM = 12.0  # higher render scale for low-confidence retries
 HEADER_FOOTER_CROP_PCT = 0.12  # crop top/bottom bands to drop running headers

@@ -1,0 +1,16 @@
+PDF EXTRACTION REPORT
+==================================================
+
+File: sample.pdf
+Size: 14.30 MB
+Total Pages: 1
+Pages with OCR: 1
+Total Characters: 1,079
+OCR Engine: easyocr+tesseract
+Language: ben
+Quality Mode: Yes
+Processing Time: 2026-02-28T03:14:26.146616
+
+PAGE QUALITY METRICS
+------------------------------
+Page   1: 0.823 confidence, 1079 chars, 21 fragments [Good]

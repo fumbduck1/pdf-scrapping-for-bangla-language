@@ -1,5 +1,5 @@
 
-from typing import Any
+from typing import Any, Tuple
 import re
 import os
 import sys
@@ -812,6 +812,9 @@ class PDFScraper:
             'statistics': {},
             'extraction_log': []
         }
+        # Layer 3: Watermark tracking for cross-page pattern detection
+        self._watermark_text_history = {}  # Track text seen repeatedly (watermarks)
+        self._detected_watermark_threshold = 0.6  # Confidence threshold for watermark classification
         os.makedirs(self.output_dir, exist_ok=True)
         from logger import get_logger
         self.logger = get_logger()
@@ -908,7 +911,99 @@ class PDFScraper:
         if self.share_ocr_instances and self.ocr:
             return self.ocr
         return self._ocr_factory()
-    
+
+    def _is_watermark_fragment(self, text: str, confidence: float, page_num: int = 0) -> Tuple[bool, float]:
+        """
+        Enhanced watermark detection combining confidence, script analysis, and cross-page pattern matching.
+
+        Returns: (is_watermark: bool, watermark_likelihood: float)
+        Watermark likelihood 0-1 where 1.0 = definitely watermark, 0.0 = definitely content
+        """
+        if not text or not self.ocr_lang.startswith('ben'):
+            return False, 0.0
+
+        tokens = re.sub(r"[\s\W_]+", "", text)
+        if not tokens:
+            return True, 1.0
+
+        ascii_letters = sum(1 for ch in tokens if ch.isascii())
+        bengali_letters = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
+        length = len(tokens)
+
+        likelihood = 0.0
+
+        # Factor 1: ASCII dominance (watermarks often English)
+        ascii_ratio = ascii_letters / max(length, 1)
+        if ascii_ratio > 0.7:
+            likelihood += 0.35
+
+        # Factor 2: Very low confidence + English dominance
+        if confidence < 0.75 and ascii_ratio > 0.65:
+            likelihood += 0.25
+
+        # Factor 3: Pure ASCII with low confidence
+        if bengali_letters == 0 and ascii_letters >= 3 and confidence < 0.85:
+            likelihood += 0.20
+
+        # Factor 4: Cross-page pattern detection (text appearing on multiple pages = likely watermark)
+        text_key = text.lower().strip()[:30]  # Use first 30 chars as hash
+        if text_key in self._watermark_text_history:
+            page_count = len(self._watermark_text_history[text_key]['pages'])
+            if page_count >= 2:  # Appears on 2+ pages
+                likelihood += 0.25 * min(page_count / 5.0, 1.0)  # Cap at +0.25
+
+        # Factor 5: Positioning anomaly (watermarks often have odd positioning)
+        # If confidence is low but image quality was good, likely watermark
+        if confidence < 0.7 and length >= 5:
+            likelihood += 0.15
+
+        # Normalize to 0-1
+        likelihood = min(likelihood, 1.0)
+
+        # Decision: is_watermark if likelihood >= threshold
+        is_watermark = likelihood >= self._detected_watermark_threshold
+
+        return is_watermark, likelihood
+
+    def _filter_watermark_text(self, fragments: list, page_num: int = 0) -> list:
+        """
+        Filter watermark-likely fragments and track patterns across pages.
+
+        Args:
+            fragments: List of (text, confidence) tuples
+            page_num: Current page number for tracking history
+
+        Returns:
+            Filtered list of (text, confidence) tuples with watermarks removed
+        """
+        if not fragments or not self.ocr_lang.startswith('ben'):
+            return fragments
+
+        filtered = []
+
+        for text, confidence in fragments:
+            # Check watermark likelihood
+            is_watermark, likelihood = self._is_watermark_fragment(text, confidence, page_num)
+
+            # Track in history
+            text_key = text.lower().strip()[:30]
+            if text_key not in self._watermark_text_history:
+                self._watermark_text_history[text_key] = {
+                    'count': 0,
+                    'pages': set(),
+                    'likelihoods': []
+                }
+
+            self._watermark_text_history[text_key]['count'] += 1
+            self._watermark_text_history[text_key]['pages'].add(page_num)
+            self._watermark_text_history[text_key]['likelihoods'].append(likelihood)
+
+            # Only keep if not a watermark
+            if not is_watermark:
+                filtered.append((text, confidence))
+
+        return filtered
+
     def setup_directories(self):
         """Create all necessary directories upfront."""
         try:
@@ -1104,6 +1199,19 @@ class PDFScraper:
                         self.log(f"[Page {page_num + 1}] High-DPI retry failed: {retry_err}")
 
             page_text = page_level_ocr['text'] if page_level_ocr else ""
+
+            # Layer 3: Apply smart watermark filtering based on confidence and cross-page patterns
+            if page_level_ocr and self.ocr_lang.startswith('ben'):
+                text_fragments = [(line, page_level_ocr.get('avg_confidence', 0.0))
+                                 for line in page_text.split('\n') if line.strip()]
+                filtered_fragments = self._filter_watermark_text(text_fragments, page_num)
+                if filtered_fragments:
+                    page_text = '\n'.join(text for text, _ in filtered_fragments)
+                    # Log watermark filtering info
+                    removed_count = len(text_fragments) - len(filtered_fragments)
+                    if removed_count > 0:
+                        self.log(f"[Page {page_num + 1}] Watermark filtering: removed {removed_count} fragments")
+
             page_data = PageResult(
                 page_number=page_num,
                 content=page_text,
