@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from preprocess import (
     quantize_params,
     crop_header_footer,
-    flatten_background,
     estimate_density,
     choose_psm,
     maybe_split_columns,
@@ -48,11 +47,6 @@ class TestPreprocess(unittest.TestCase):
         cropped = crop_header_footer(self.test_image)
         self.assertIsInstance(cropped, Image.Image)
         self.assertLess(cropped.height, self.test_image.height)
-    
-    def test_flatten_background(self):
-        """Test background flattening"""
-        flattened = flatten_background(self.test_image, clip=200)
-        self.assertIsInstance(flattened, Image.Image)
     
     def test_estimate_density(self):
         """Test density estimation"""

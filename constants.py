@@ -16,13 +16,6 @@ TEXT_LAYER_FIRST = True  # if True, attempt PDF text layer before OCR
 TEXT_LAYER_LANG_MIN_RATIO = 0.35  # minimum Bangla ratio in text layer to accept without OCR
 TEXT_LAYER_MIN_BEN_CHARS = 12  # minimum Bangla chars to trust text layer for Bangla
 PDF_BYTES_CACHE_MB = 80  # cap for in-memory caching to reuse bytes for rendering
-WATERMARK_FLATTEN = True  # if True, clip faint backgrounds before OCR
-WATERMARK_CLIP_THRESHOLD = 245  # luminance threshold for clipping to white (Bangla: stronger flatten)
-WATERMARK_RETRY_CONF = 0.82  # rerun on flattened background if below this
-# Enhanced watermark detection for dark watermarks
-WATERMARK_DETECTION_CONFIDENCE = 0.6  # Threshold for considering text as watermark (0-1)
-WATERMARK_ADAPTIVE_THRESHOLD = 200  # Luminance threshold for adaptive watermark removal (lower than 245 for dark watermarks)
-WATERMARK_FREQUENCY_THRESHOLD = 2  # Minimum page appearances to mark as watermark
 HIGH_DPI_RETRY_CONF = 0.92  # rerender at higher zoom when below this confidence
 HIGH_DPI_ZOOM = 12.0  # higher render scale for low-confidence retries
 HEADER_FOOTER_CROP_PCT = 0.12  # crop top/bottom bands to drop running headers
@@ -53,7 +46,6 @@ LITE_PRESET = {
     "text_layer_min_ben_chars": LITE_TEXT_LAYER_MIN_BEN_CHARS,
     "fast_mode": True,
     "quality_mode": True,
-    "watermark_flatten": False,
     "quantize_levels": 28,
     "quantize_dither": False,
     "third_pass_scale": 1.0,

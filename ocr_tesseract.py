@@ -3,7 +3,6 @@
 from constants import (
     SEGMENT_RETRY_CONF,
     THIRD_PASS_SCALE,
-    WATERMARK_RETRY_CONF,
 )
 from deps import pytesseract
 from preprocess import upscale_for_retry
@@ -178,15 +177,6 @@ def tesseract_best_for_segment(seg, alt_seg, psm_for_seg, ocr_lang, quality_mode
         pass_b = run_tesseract_pass(seg, ocr_lang, quality_mode, psm=psm_for_seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, log=log, log_error=log_error)
 
     best = pass_a if score_result(pass_a) >= score_result(pass_b) else pass_b
-
-    if alt_seg is not None and (not best or best.get('avg_confidence', 0) < WATERMARK_RETRY_CONF):
-        alt_a = run_tesseract_pass(alt_seg, ocr_lang, quality_mode, psm=psm_for_seg, log=log, log_error=log_error)
-        alt_b = None
-        if not alt_a or alt_a.get('avg_confidence', 0) < fast_conf_skip:
-            alt_b = run_tesseract_pass(alt_seg, ocr_lang, quality_mode, psm=psm_for_seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, log=log, log_error=log_error)
-        alt_best = alt_a if score_result(alt_a) >= score_result(alt_b) else alt_b
-        if score_result(alt_best) > score_result(best):
-            best = alt_best
 
     if best is None or best.get('avg_confidence', 0) < SEGMENT_RETRY_CONF or best.get('fragments', 0) < 2:
         retry_seg = upscale_for_retry(seg, scale=THIRD_PASS_SCALE)

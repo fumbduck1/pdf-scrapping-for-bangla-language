@@ -13,9 +13,6 @@ from constants import (
     TEXT_LAYER_LANG_MIN_RATIO,
     TEXT_LAYER_MIN_BEN_CHARS,
     PDF_BYTES_CACHE_MB,
-    WATERMARK_FLATTEN,
-    WATERMARK_CLIP_THRESHOLD,
-    WATERMARK_RETRY_CONF,
     HIGH_DPI_RETRY_CONF,
     HIGH_DPI_ZOOM,
     HEADER_FOOTER_CROP_PCT,
@@ -63,9 +60,6 @@ class RenderConfig:
 class PreprocessConfig:
     """Image preprocessing configuration"""
     header_footer_crop_pct: float = HEADER_FOOTER_CROP_PCT
-    watermark_flatten: bool = WATERMARK_FLATTEN
-    watermark_clip_threshold: int = WATERMARK_CLIP_THRESHOLD
-    watermark_retry_conf: float = WATERMARK_RETRY_CONF
     quantize_levels: int = QUANTIZE_LEVELS
     quantize_dither: bool = QUANTIZE_DITHER
     third_pass_scale: float = THIRD_PASS_SCALE
@@ -169,9 +163,6 @@ class ConfigManager:
         
         preprocess_config = PreprocessConfig(
             header_footer_crop_pct=config_dict.get("header_footer_crop_pct", preprocess_section.get("header_footer_crop_pct", HEADER_FOOTER_CROP_PCT)),
-            watermark_flatten=config_dict.get("watermark_flatten", preprocess_section.get("watermark_flatten", WATERMARK_FLATTEN)),
-            watermark_clip_threshold=config_dict.get("watermark_clip_threshold", preprocess_section.get("watermark_clip_threshold", WATERMARK_CLIP_THRESHOLD)),
-            watermark_retry_conf=config_dict.get("watermark_retry_conf", preprocess_section.get("watermark_retry_conf", WATERMARK_RETRY_CONF)),
             quantize_levels=config_dict.get("quantize_levels", preprocess_section.get("quantize_levels", QUANTIZE_LEVELS)),
             quantize_dither=config_dict.get("quantize_dither", preprocess_section.get("quantize_dither", QUANTIZE_DITHER)),
             third_pass_scale=config_dict.get("third_pass_scale", preprocess_section.get("third_pass_scale", THIRD_PASS_SCALE)),
@@ -349,7 +340,6 @@ class ConfigManager:
         config.render.pdf_bytes_cache_mb = min(config.render.pdf_bytes_cache_mb, 64)
         config.render.render_cache_max_items = LITE_PRESET["render_cache_max_items"]
 
-        config.preprocess.watermark_flatten = LITE_PRESET["watermark_flatten"]
         config.preprocess.quantize_levels = LITE_PRESET["quantize_levels"]
         config.preprocess.quantize_dither = LITE_PRESET["quantize_dither"]
         config.preprocess.third_pass_scale = LITE_PRESET["third_pass_scale"]

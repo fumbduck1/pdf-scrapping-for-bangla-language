@@ -125,9 +125,6 @@ You can also use a JSON or YAML configuration file:
   },
   "preprocess": {
     "header_footer_crop_pct": 0.12,
-    "watermark_flatten": true,
-    "watermark_clip_threshold": 245,
-    "watermark_retry_conf": 0.82,
     "quantize_levels": 32,
     "quantize_dither": true,
     "third_pass_scale": 1.45

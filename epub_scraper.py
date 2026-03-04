@@ -123,8 +123,6 @@ class EPUBScraper:
         from constants import (
             FAST_CONFIDENCE_SKIP,
             HEADER_FOOTER_CROP_PCT,
-            WATERMARK_FLATTEN,
-            WATERMARK_CLIP_THRESHOLD
         )
         
         self.ocr_pipeline = OcrPipeline(
@@ -137,8 +135,6 @@ class EPUBScraper:
             log=self.log,
             log_error=self.log_error,
             header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
-            watermark_flatten=WATERMARK_FLATTEN,
-            watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD
         )
     
     @classmethod

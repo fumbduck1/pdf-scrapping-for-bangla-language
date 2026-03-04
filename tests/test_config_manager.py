@@ -111,9 +111,6 @@ class TestConfigManager(unittest.TestCase):
             "pdf_bytes_cache_mb": 100,
             "persist_renders": True,
             "header_footer_crop_pct": 0.1,
-            "watermark_flatten": False,
-            "watermark_clip_threshold": 240,
-            "watermark_retry_conf": 0.8,
             "quantize_levels": 16,
             "quantize_dither": False,
             "third_pass_scale": 1.5,
@@ -140,9 +137,6 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(config.render.pdf_bytes_cache_mb, 100)
         self.assertTrue(config.render.persist_renders)
         self.assertEqual(config.preprocess.header_footer_crop_pct, 0.1)
-        self.assertFalse(config.preprocess.watermark_flatten)
-        self.assertEqual(config.preprocess.watermark_clip_threshold, 240)
-        self.assertEqual(config.preprocess.watermark_retry_conf, 0.8)
         self.assertEqual(config.preprocess.quantize_levels, 16)
         self.assertFalse(config.preprocess.quantize_dither)
         self.assertEqual(config.preprocess.third_pass_scale, 1.5)

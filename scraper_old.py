@@ -24,9 +24,6 @@ from constants import (
     TEXT_LAYER_LANG_MIN_RATIO,
     TEXT_LAYER_MIN_BEN_CHARS,
     PDF_BYTES_CACHE_MB,
-    WATERMARK_FLATTEN,
-    WATERMARK_CLIP_THRESHOLD,
-    WATERMARK_RETRY_CONF,
     HIGH_DPI_RETRY_CONF,
     HIGH_DPI_ZOOM,
     AUTO_APPEND_ENG_FOR_BEN,
@@ -320,7 +317,7 @@ class OcrPipeline:
     """OCR orchestrator that encapsulates EasyOCR/Tesseract strategies."""
 
     def __init__(self, ocr_method, ocr_lang, quality_mode, fast_mode, fast_conf_skip, tessdata_dir, log, log_error,
-                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT, watermark_flatten=WATERMARK_FLATTEN, watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
+                 header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
                  auto_append_eng_for_ben=AUTO_APPEND_ENG_FOR_BEN, segment_retry_conf=SEGMENT_RETRY_CONF,
                  easyocr_fallback_conf=EASYOCR_FALLBACK_CONF, easyocr_primary_conf=EASYOCR_PRIMARY_CONF,
                  tesseract_refine_min_chars=TESSERACT_REFINE_MIN_CHARS):
@@ -331,8 +328,6 @@ class OcrPipeline:
         self.fast_mode = fast_mode
         self.fast_conf_skip = fast_conf_skip
         self.header_footer_crop_pct = header_footer_crop_pct
-        self.watermark_flatten = watermark_flatten
-        self.watermark_clip_threshold = watermark_clip_threshold
         self.tessdata_dir = sanitize_tessdata_prefix(tessdata_dir)
         self.auto_append_eng_for_ben = auto_append_eng_for_ben
         self.segment_retry_conf = segment_retry_conf
@@ -360,10 +355,6 @@ class OcrPipeline:
 
     def _maybe_split_columns(self, image):
         return preproc.maybe_split_columns(image, fast_mode=self.fast_mode)
-
-    def _flatten_background(self, image, clip=None):
-        clip_val = self.watermark_clip_threshold if clip is None else clip
-        return preproc.flatten_background(image, clip=clip_val)
 
     def _choose_psm(self, image, segment_count):
         return preproc.choose_psm(image, segment_count)
@@ -524,8 +515,6 @@ class OcrPipeline:
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
-            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
-            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
             segments = [(seg, idx) for idx, seg in enumerate(base_segments_preview)]
 
             combined_text = []
@@ -538,19 +527,10 @@ class OcrPipeline:
                     preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
                 except Exception:
                     pass
-                if flattened_img is not None:
-                    try:
-                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
-                    except Exception:
-                        pass
 
             for seg, idx in segments:
-                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
                 easy_res = self._run_easyocr_pass(seg)
-                alt_easy = self._run_easyocr_pass(alt_seg) if alt_seg is not None else None
                 best = easy_res
-                if self._score_result(alt_easy) > self._score_result(best):
-                    best = alt_easy
 
                 needs_refine = False
                 if TESSERACT_AVAILABLE:
@@ -564,7 +544,7 @@ class OcrPipeline:
 
                 if needs_refine:
                     self._verify_language_file()
-                    tess_best = self._tesseract_best_for_segment(seg, alt_seg, psm_for_seg)
+                    tess_best = self._tesseract_best_for_segment(seg, None, psm_for_seg)
                     if self._score_result(tess_best) > self._score_result(best):
                         best = tess_best
                         refined = True
@@ -614,21 +594,14 @@ class OcrPipeline:
 
             base_segments_preview = self._maybe_split_columns(preprocessed_img)
             psm_for_seg = self._choose_psm(preprocessed_img, len(base_segments_preview))
-            flattened_img = self._flatten_background(preprocessed_img) if self.watermark_flatten else None
 
             if self.ocr_lang.startswith('ben'):
                 try:
                     preprocessed_img = preprocessed_img.filter(ImageFilter.MaxFilter(3))
                 except Exception:
                     pass
-                if flattened_img is not None:
-                    try:
-                        flattened_img = flattened_img.filter(ImageFilter.MaxFilter(3))
-                    except Exception:
-                        pass
 
             base_segments = base_segments_preview
-            flat_segments = self._maybe_split_columns(flattened_img) if flattened_img is not None else None
             segments = [(seg, idx) for idx, seg in enumerate(base_segments)]
 
             combined_text = []
@@ -636,23 +609,12 @@ class OcrPipeline:
             total_fragments = 0
 
             for seg, idx in segments:
-                alt_seg = flat_segments[idx] if flat_segments and idx < len(flat_segments) else None
-
                 pass_a = self._run_tesseract_pass(seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
                 pass_b = None
                 if not pass_a or pass_a.get('avg_confidence', 0) < self.fast_conf_skip:
                     pass_b = self._run_tesseract_pass(seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
 
                 best = pass_a if self._score_result(pass_a) >= self._score_result(pass_b) else pass_b
-
-                if alt_seg is not None and (not best or best.get('avg_confidence', 0) < WATERMARK_RETRY_CONF):
-                    alt_a = self._run_tesseract_pass(alt_seg, extra_config=None, extra_dilate=False, psm=psm_for_seg)
-                    alt_b = None
-                    if not alt_a or alt_a.get('avg_confidence', 0) < self.fast_conf_skip:
-                        alt_b = self._run_tesseract_pass(alt_seg, extra_config=["-c lstm_choice_mode=2"], extra_dilate=True, psm=psm_for_seg)
-                    alt_best = alt_a if self._score_result(alt_a) >= self._score_result(alt_b) else alt_b
-                    if self._score_result(alt_best) > self._score_result(best):
-                        best = alt_best
 
                 if best is None or best.get('avg_confidence', 0) < self.segment_retry_conf or best.get('fragments', 0) < 2:
                     retry_seg = preproc.upscale_for_retry(seg, scale=THIRD_PASS_SCALE)
@@ -748,9 +710,6 @@ class PDFScraper:
         high_dpi_zoom=HIGH_DPI_ZOOM,
         high_dpi_retry_conf=HIGH_DPI_RETRY_CONF,
         header_footer_crop_pct=HEADER_FOOTER_CROP_PCT,
-        watermark_flatten=WATERMARK_FLATTEN,
-        watermark_clip_threshold=WATERMARK_CLIP_THRESHOLD,
-        watermark_retry_conf=WATERMARK_RETRY_CONF,
         quantize_levels=QUANTIZE_LEVELS,
         quantize_dither=QUANTIZE_DITHER,
         third_pass_scale=THIRD_PASS_SCALE,
@@ -792,9 +751,6 @@ class PDFScraper:
         self.high_dpi_retry_conf = high_dpi_retry_conf
         self.high_dpi_zoom = high_dpi_zoom
         self.header_footer_crop_pct = header_footer_crop_pct
-        self.watermark_flatten = watermark_flatten
-        self.watermark_clip_threshold = watermark_clip_threshold
-        self.watermark_retry_conf = watermark_retry_conf
         self.quantize_levels = quantize_levels
         self.quantize_dither = quantize_dither
         self.third_pass_scale = third_pass_scale
@@ -812,9 +768,6 @@ class PDFScraper:
             'statistics': {},
             'extraction_log': []
         }
-        # Layer 3: Watermark tracking for cross-page pattern detection
-        self._watermark_text_history = {}  # Track text seen repeatedly (watermarks)
-        self._detected_watermark_threshold = 0.6  # Confidence threshold for watermark classification
         os.makedirs(self.output_dir, exist_ok=True)
         from logger import get_logger
         self.logger = get_logger()
@@ -868,9 +821,6 @@ class PDFScraper:
             high_dpi_zoom=job_config.render.high_dpi_zoom,
             high_dpi_retry_conf=job_config.render.high_dpi_retry_conf,
             header_footer_crop_pct=job_config.preprocess.header_footer_crop_pct,
-            watermark_flatten=job_config.preprocess.watermark_flatten,
-            watermark_clip_threshold=job_config.preprocess.watermark_clip_threshold,
-            watermark_retry_conf=job_config.preprocess.watermark_retry_conf,
             quantize_levels=job_config.preprocess.quantize_levels,
             quantize_dither=job_config.preprocess.quantize_dither,
             third_pass_scale=job_config.preprocess.third_pass_scale,
@@ -898,8 +848,6 @@ class PDFScraper:
             log=self.log,
             log_error=self.log_error,
             header_footer_crop_pct=self.header_footer_crop_pct,
-            watermark_flatten=self.watermark_flatten,
-            watermark_clip_threshold=self.watermark_clip_threshold,
             auto_append_eng_for_ben=self.auto_append_eng_for_ben,
             segment_retry_conf=self.segment_retry_conf,
             easyocr_fallback_conf=self.easyocr_fallback_conf,
@@ -911,98 +859,6 @@ class PDFScraper:
         if self.share_ocr_instances and self.ocr:
             return self.ocr
         return self._ocr_factory()
-
-    def _is_watermark_fragment(self, text: str, confidence: float, page_num: int = 0) -> Tuple[bool, float]:
-        """
-        Enhanced watermark detection combining confidence, script analysis, and cross-page pattern matching.
-
-        Returns: (is_watermark: bool, watermark_likelihood: float)
-        Watermark likelihood 0-1 where 1.0 = definitely watermark, 0.0 = definitely content
-        """
-        if not text or not self.ocr_lang.startswith('ben'):
-            return False, 0.0
-
-        tokens = re.sub(r"[\s\W_]+", "", text)
-        if not tokens:
-            return True, 1.0
-
-        ascii_letters = sum(1 for ch in tokens if ch.isascii())
-        bengali_letters = sum(1 for ch in tokens if '\u0980' <= ch <= '\u09FF')
-        length = len(tokens)
-
-        likelihood = 0.0
-
-        # Factor 1: ASCII dominance (watermarks often English)
-        ascii_ratio = ascii_letters / max(length, 1)
-        if ascii_ratio > 0.7:
-            likelihood += 0.35
-
-        # Factor 2: Very low confidence + English dominance
-        if confidence < 0.75 and ascii_ratio > 0.65:
-            likelihood += 0.25
-
-        # Factor 3: Pure ASCII with low confidence
-        if bengali_letters == 0 and ascii_letters >= 3 and confidence < 0.85:
-            likelihood += 0.20
-
-        # Factor 4: Cross-page pattern detection (text appearing on multiple pages = likely watermark)
-        text_key = text.lower().strip()[:30]  # Use first 30 chars as hash
-        if text_key in self._watermark_text_history:
-            page_count = len(self._watermark_text_history[text_key]['pages'])
-            if page_count >= 2:  # Appears on 2+ pages
-                likelihood += 0.25 * min(page_count / 5.0, 1.0)  # Cap at +0.25
-
-        # Factor 5: Positioning anomaly (watermarks often have odd positioning)
-        # If confidence is low but image quality was good, likely watermark
-        if confidence < 0.7 and length >= 5:
-            likelihood += 0.15
-
-        # Normalize to 0-1
-        likelihood = min(likelihood, 1.0)
-
-        # Decision: is_watermark if likelihood >= threshold
-        is_watermark = likelihood >= self._detected_watermark_threshold
-
-        return is_watermark, likelihood
-
-    def _filter_watermark_text(self, fragments: list, page_num: int = 0) -> list:
-        """
-        Filter watermark-likely fragments and track patterns across pages.
-
-        Args:
-            fragments: List of (text, confidence) tuples
-            page_num: Current page number for tracking history
-
-        Returns:
-            Filtered list of (text, confidence) tuples with watermarks removed
-        """
-        if not fragments or not self.ocr_lang.startswith('ben'):
-            return fragments
-
-        filtered = []
-
-        for text, confidence in fragments:
-            # Check watermark likelihood
-            is_watermark, likelihood = self._is_watermark_fragment(text, confidence, page_num)
-
-            # Track in history
-            text_key = text.lower().strip()[:30]
-            if text_key not in self._watermark_text_history:
-                self._watermark_text_history[text_key] = {
-                    'count': 0,
-                    'pages': set(),
-                    'likelihoods': []
-                }
-
-            self._watermark_text_history[text_key]['count'] += 1
-            self._watermark_text_history[text_key]['pages'].add(page_num)
-            self._watermark_text_history[text_key]['likelihoods'].append(likelihood)
-
-            # Only keep if not a watermark
-            if not is_watermark:
-                filtered.append((text, confidence))
-
-        return filtered
 
     def setup_directories(self):
         """Create all necessary directories upfront."""
@@ -1200,18 +1056,6 @@ class PDFScraper:
 
             page_text = page_level_ocr['text'] if page_level_ocr else ""
 
-            # Layer 3: Apply smart watermark filtering based on confidence and cross-page patterns
-            if page_level_ocr and self.ocr_lang.startswith('ben'):
-                text_fragments = [(line, page_level_ocr.get('avg_confidence', 0.0))
-                                 for line in page_text.split('\n') if line.strip()]
-                filtered_fragments = self._filter_watermark_text(text_fragments, page_num)
-                if filtered_fragments:
-                    page_text = '\n'.join(text for text, _ in filtered_fragments)
-                    # Log watermark filtering info
-                    removed_count = len(text_fragments) - len(filtered_fragments)
-                    if removed_count > 0:
-                        self.log(f"[Page {page_num + 1}] Watermark filtering: removed {removed_count} fragments")
-
             page_data = PageResult(
                 page_number=page_num,
                 content=page_text,
@@ -1241,10 +1085,6 @@ class PDFScraper:
     def _bangla_ratio(self, text: str):
         """Return (ratio, count) of Bangla characters in the text."""
         return bangla_ratio(text)
-
-    def _flatten_background(self, image, clip=None):
-        clip_val = self.watermark_clip_threshold if clip is None else clip
-        return preproc.flatten_background(image, clip=clip_val)
 
     def _choose_psm(self, image, segment_count):
         return preproc.choose_psm(image, segment_count)
