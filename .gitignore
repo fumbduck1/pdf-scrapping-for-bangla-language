@@ -9,6 +9,7 @@ logs/
 
 # Project outputs and logs
 output/
+test_output/
 performance_output/
 performance_analysis/
 benchmark_output/
