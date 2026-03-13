@@ -1,8 +1,10 @@
 # PDF Scraper - OCR Extractor
-
+![Alt text](images\image.png?raw=true "Title")
 ## Overview
 
 This project is a comprehensive PDF scraping tool that uses OCR (Optical Character Recognition) to extract text from PDF documents. It supports both EasyOCR and Tesseract OCR engines, with intelligent retry logic and performance monitoring.
+
+(not effecient for watermarked pictures oriented pdfs. couldnt handle it properly.)
 
 ## Features
 
@@ -165,13 +167,8 @@ Use the lite preset when you want a consumer-friendly run: single EasyOCR engine
 - Check the console output for error messages
 
 ## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test your changes
-5. Submit a pull request
-
+No need to contrbute on this project. 
+Changed workflow to achieve end goals.
 ## License
 
 MIT License
