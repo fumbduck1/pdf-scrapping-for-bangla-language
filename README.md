@@ -1,5 +1,6 @@
 # PDF Scraper - OCR Extractor
-![Alt text](images\image.png?raw=true "Title")
+
+![Alt text](https://raw.githubusercontent.com/fumbduck1/pdf-scrapping-for-bangla-language/e2d0404ad62afb282a6ae995a6c69c86c2522284/images/image.png?raw=true "Title")
 ## Overview
 
 This project is a comprehensive PDF scraping tool that uses OCR (Optical Character Recognition) to extract text from PDF documents. It supports both EasyOCR and Tesseract OCR engines, with intelligent retry logic and performance monitoring.
